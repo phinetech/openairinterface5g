@@ -670,6 +670,12 @@ void nr_schedule_mbs(gNB_MAC_INST *mac, nr_cell_sched_t *cell, post_process_pdsc
   AssertFatal(pthread_mutex_trylock(&mac->sched_lock) == EBUSY, "this function should be called with the scheduler mutex locked\n");
   if (!is_dl_slot(pp_pdsch->slot, &cell->frame_structure))
     return;
+  /* Interim, and the one line of this file that is not Alex's: a broadcast
+   * session has no membership to learn, so until SIB20/MCCH announce the
+   * group its receivers have to be joined individually. Once a frame is
+   * often enough. */
+  if (pp_pdsch->slot == 0)
+    nr_mbs_join_eligible_ues(mac, cell);
   for (nr_mbs_group_t **g = mac->UE_info.mbs_group_list; *g; g++) {
     if ((*g)->cell == cell)
       nr_schedule_mbs_group(mac, cell, pp_pdsch, *g);
