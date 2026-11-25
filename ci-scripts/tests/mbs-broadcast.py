@@ -18,7 +18,7 @@ def docker(*args):
 
 def received():
     return [
-        int(docker("exec", f"mbs-ue{n}", "cat", "/sys/class/net/oaitun_ue1/statistics/rx_packets"))
+        int(docker("exec", f"mbs-ue{n}", "cat", "/sys/class/net/oaimbs_ue1/statistics/rx_packets"))
         for n in (1, 2, 3)
     ]
 

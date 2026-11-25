@@ -196,13 +196,15 @@ application sends to: the core distributes the session to a group of its own.
 
 ## Send traffic and watch it arrive
 
-What a UE receives on the group is written to `oaitun_ue1`, so counting the
-packets the interface took in is enough; the UEs are otherwise idle. Read the
+What a UE receives on a broadcast session is written to its broadcast
+interface, `oaimbs_ue1` (address 169.254.0.1, link-local and not routed): a
+broadcast session belongs to no PDU session, so it does not go to
+`oaitun_ue1`. Counting the packets the interface took in is enough. Read the
 counter before sending:
 
 ```bash
 for n in 1 2 3; do
-  docker exec mbs-ue$n cat /sys/class/net/oaitun_ue1/statistics/rx_packets > /tmp/ue$n.before
+  docker exec mbs-ue$n cat /sys/class/net/oaimbs_ue1/statistics/rx_packets > /tmp/ue$n.before
 done
 ```
 
@@ -219,7 +221,7 @@ Count what each UE received:
 
 ```bash
 for n in 1 2 3; do
-  after=$(docker exec mbs-ue$n cat /sys/class/net/oaitun_ue1/statistics/rx_packets)
+  after=$(docker exec mbs-ue$n cat /sys/class/net/oaimbs_ue1/statistics/rx_packets)
   echo "ue$n: $((after - $(cat /tmp/ue$n.before))) of 20"
 done
 ```
@@ -288,6 +290,6 @@ the next start.
   rather than having a broadcast process of its own. The gNB therefore keeps
   four HARQ processes of every connected UE away from unicast while a
   session exists.
-* **The UE delivers what it receives to the interface of its first PDU
-  session**, as it has no interface for MBS sessions. A UE that never had a
-  PDU session receives the session but has nowhere to deliver it.
+* **An OAI UE whose registration is rejected stops reading system
+  information**, so it does not find a broadcast session either, although
+  the broadcast interface needs no registration.

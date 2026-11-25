@@ -42,6 +42,7 @@
 #include "LAYER2/nr_pdcp/nr_pdcp_oai_api.h"
 #include "LAYER2/nr_pdcp/nr_pdcp_mbs_test.h"
 #include "LAYER2/nr_pdcp/nr_pdcp_asn1_utils.h"
+#include "common/utils/tuntap_if.h"
 #include "openair3/SECU/secu_defs.h"
 #include "openair3/SECU/key_nas_deriver.h"
 
@@ -295,16 +296,41 @@ static void nr_rrc_process_ntnconfig(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *S
     nr_timer_start(&SI_info->SInfo_r17.sib19_timer);
 }
 
-/* INTERIM: the SDUs of a broadcast session go to the interface of the first PDU session of the UE, until the UE has an
- * interface for MBS sessions. NAS keeps that interface while the UE is in RRC_IDLE, SDAP does not */
+/* The SDUs of the UE's broadcast sessions go to an interface of their own, oaimbs_ue<N>. A broadcast session belongs to
+ * no PDU session and is received in RRC_IDLE and RRC_INACTIVE too (TS 38.300 §16.10.1), so the UE may have no PDU
+ * session, and no address from the network, to deliver it on. The packets are not addressed to the UE but to the
+ * session's multicast group, so the interface needs no such address: a link-local one, which is not routed, keeps
+ * tools that expect an IPv4 address happy. No route goes over the interface, the UE sends nothing on it. */
+#define NR_UE_MBS_BROADCAST_IF_ADDR "169.254.0.1"
+
+static void nr_rrc_ue_create_mbs_broadcast_if(NR_UE_RRC_INST_t *rrc)
+{
+  if (rrc->mbs_broadcast_sock >= 0)
+    return;
+  char ifname[IFNAMSIZ];
+  snprintf(ifname, sizeof(ifname), "oaimbs_ue%d", (int)(rrc->ue_id % 1000) + 1);
+  const int sock = tuntap_alloc(IFF_TUN, ifname);
+  if (sock < 0 || !tun_config(ifname, NR_UE_MBS_BROADCAST_IF_ADDR, NULL)) {
+    RRCLOG_E("MBS: could not create the broadcast interface %s, broadcast sessions are not delivered\n", ifname);
+    return;
+  }
+  /* the source of the packets, the session's application server, is not reachable over this interface: a strict
+   * reverse path filter would drop them */
+  char path[96];
+  snprintf(path, sizeof(path), "/proc/sys/net/ipv4/conf/%s/rp_filter", ifname);
+  FILE *f = fopen(path, "w");
+  if (f) {
+    fputs("0", f);
+    fclose(f);
+  }
+  rrc->mbs_broadcast_sock = sock;
+  RRCLOG_A("MBS: broadcast sessions are delivered on %s (%s)\n", ifname, NR_UE_MBS_BROADCAST_IF_ADDR);
+}
+
 static int nr_rrc_ue_mbs_broadcast_tun(ue_id_t ue_id)
 {
-  const nr_ue_nas_t *nas = get_ue_nas_info(ue_id);
-  for (int psi = 1; psi < MAX_NUM_PSI; psi++) {
-    if (nas->psi_status[psi] != PDU_SESSION_INACTIVE && nas->pdu_tun[psi].sock >= 0)
-      return nas->pdu_tun[psi].sock;
-  }
-  return -1;
+  const NR_UE_RRC_INST_t *rrc = get_NR_UE_rrc_inst(ue_id);
+  return rrc ? rrc->mbs_broadcast_sock : -1;
 }
 
 /* RLC entity and MRB of a broadcast session, from its MRB-InfoBroadcast (TS 38.331 §5.9.2.3). The MRB has no identity
@@ -335,6 +361,7 @@ static void nr_rrc_ue_add_mbs_broadcast_mrb(NR_UE_RRC_INST_t *rrc, const NR_MRB_
 
   const long *t_reordering = mrb->pdcp_Config_r17.t_Reordering_r17;
   /* no PDU session: a broadcast session has none (TS 23.247 §7.3) */
+  nr_rrc_ue_create_mbs_broadcast_if(rrc);
   nr_sdap_set_mbs_broadcast_tun(nr_rrc_ue_mbs_broadcast_tun);
   nr_pdcp_add_mrb(false, rrc->ue_id, lcid, 0, 12, t_reordering ? t_reordering_ms[*t_reordering] : 0);
   rrc->mbs_broadcast_lcids |= 1ULL << lcid;
@@ -2124,6 +2151,7 @@ NR_UE_RRC_INST_t* nr_rrc_init_ue(char* uecap_file, int instance_id, int num_ant_
   NR_UE_rrc_inst[instance_id] = calloc_or_fail(1, sizeof(NR_UE_RRC_INST_t));
   NR_UE_RRC_INST_t *rrc = NR_UE_rrc_inst[instance_id];
   rrc->ue_id = instance_id;
+  rrc->mbs_broadcast_sock = -1;
   // fill UE-NR-Capability @ UE-CapabilityRAT-Container here.
   rrc->selected_plmn_identity = 1;
   rrc->ra_trigger = RA_NOT_RUNNING;

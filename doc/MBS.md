@@ -325,8 +325,8 @@ openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c       nr_ue_dl_processing()
   - TODO: With a CU/DU split, F1-U must carry the MRB PDUs to the DU and call it there. Therefore, keep this function as is and consider how to call it when CU/DU is supported.
 
 - `sdap_mrb_data_ind()`
-  - Today: Multicast writes to the associated PDU session's tun; the test adapter associates the MRB with the first PDU session. `mbs.sh ll` gives the other UEs the IP of UE 1 because the adapter redirects unicast-addressed traffic. Broadcast carries the original multicast IP packets to the NAS-provided tun and needs no IP reassignment.
-  - TODO: Replace the multicast adapter's unicast traffic and fixed PDU-session association with delivery for the actual multicast session, so `mbs.sh ll` no longer needs to reassign UE addresses. A dedicated UE interface for broadcast sessions is also still missing.
+  - Today: Multicast writes to the associated PDU session's tun; the test adapter associates the MRB with the first PDU session. `mbs.sh ll` gives the other UEs the IP of UE 1 because the adapter redirects unicast-addressed traffic. Broadcast carries the original multicast IP packets to the UE's broadcast interface `oaimbs_ue<N>` (169.254.0.1, created with the first broadcast session), as a broadcast session belongs to no PDU session, and needs no IP reassignment.
+  - TODO: Replace the multicast adapter's unicast traffic and fixed PDU-session association with delivery for the actual multicast session, so `mbs.sh ll` no longer needs to reassign UE addresses.
 
 ### ACK/NACK and Retransmissions
 
