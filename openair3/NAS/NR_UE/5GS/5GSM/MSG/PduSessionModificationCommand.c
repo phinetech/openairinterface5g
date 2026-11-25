@@ -110,6 +110,24 @@ int decode_pdu_session_modification_command(pdu_session_modification_command_msg
         break;
       }
 
+      case IEI_MOD_RECEIVED_MBS_CONTAINER: {
+        /* Type 6 IE (TLV-E): two octets of length, then the Received MBS informations. */
+        uint16_t mbs_length = 0;
+        GET_SHORT(curPtr, mbs_length);
+        curPtr += sizeof(mbs_length);
+        if (curPtr + mbs_length > buffer + msg_length) {
+          LOG_E(NAS, "Received MBS container of %u octets runs past the message\n", mbs_length);
+          return -1;
+        }
+        if (decode_received_mbs_container(&psmc_msg->received_mbs, curPtr, mbs_length) < 0) {
+          LOG_E(NAS, "Could not decode the Received MBS container\n");
+          return -1;
+        }
+        psmc_msg->received_mbs_present = true;
+        curPtr += mbs_length;
+        break;
+      }
+
       default:
         LOG_W(NAS, "PDU SESSION MODIFICATION COMMAND - Unknown IEI 0x%02x\n", psmc_iei);
         return -1;

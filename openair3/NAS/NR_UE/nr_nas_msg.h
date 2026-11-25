@@ -91,6 +91,10 @@ void generateServiceRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas, bool
 void *nas_nrue_task(void *args_p);
 void *nas_nrue(void *args_p);
 void nas_init_nrue(int num_ues);
+/** @brief Ask UE \p ue_id to join (or leave) the multicast MBS session of this TMGI (12 hex characters)
+ *  over its first active PDU session. 0 when sent; -1 bad TMGI, -2 no NAS security, -3 no active PDU
+ *  session, -4 the message could not be built. */
+int nas_mbs_request(int ue_id, const char *tmgi_hex, bool join);
 int nas_itti_kgnb_refresh_req(instance_t instance, const uint8_t kgnb[32]);
 void request_pdusession(nr_ue_nas_t *nas, const pdu_session_config_t *pdu);
 nr_ue_nas_t *get_nr_ue_nas_info(int ue_inst);

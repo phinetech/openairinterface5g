@@ -5,6 +5,8 @@
 /* TEMPORARY test adapter for MBS PTM scheduling, see nr_mbs_test_adapter.h */
 
 #include <arpa/inet.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
 #include <unistd.h>
 #include "nr_mbs_test_adapter.h"
 #include "mac_proto.h"
@@ -31,6 +33,11 @@ typedef struct {
   int sdu_interval_ms;
   ue_id_t shared_delivery_ue_id;
   int shared_delivery_pdu_session;
+  /// create a group that every UE joins, or only feed the groups of the UEs that joined through the 5GC
+  bool join_ues;
+  /// with join_ues = 0, the destination of the test datagrams
+  struct in_addr udp_dst_addr;
+  uint16_t udp_dst_port;
 } nr_mbs_test_adapter_t;
 
 static nr_mbs_test_adapter_t *adapter;
@@ -61,6 +68,60 @@ static bool shared_delivery(ue_id_t ue_id, int pdusession_id, const uint8_t *buf
     return false;
   nr_pdcp_mrb_data_req(a->pdcp_context, a->group_config.mrb_id, buf, size);
   return true;
+}
+
+/* join_ues = 0: the numbered test SDUs go to every multicast group with members, standing in for its shared N3 tunnel */
+static void *nr_mbs_test_feed_thread(void *arg)
+{
+  nr_mbs_test_adapter_t *a = arg;
+  gNB_MAC_INST *mac = a->mac;
+  /* an IPv4/UDP datagram, so that it reaches an application on the UE; the UDP checksum is optional in IPv4. The
+   * source is 192.0.2.1 (TEST-NET-1, RFC 5737): a loopback source would be dropped by the receiving kernel. */
+  uint8_t sdu[a->sdu_size];
+  for (int i = 0; i < a->sdu_size; i++)
+    sdu[i] = i & 0xff;
+  struct iphdr *ip = (struct iphdr *)sdu;
+  *ip = (struct iphdr){.version = 4, .ihl = 5, .tot_len = htons(a->sdu_size), .ttl = 64, .protocol = IPPROTO_UDP,
+                       .saddr = htonl(0xc0000201), .daddr = a->udp_dst_addr.s_addr};
+  uint32_t sum = 0;
+  for (int i = 0; i < 10; i++)
+    sum += ((uint16_t *)ip)[i];
+  while (sum >> 16)
+    sum = (sum & 0xffff) + (sum >> 16);
+  ip->check = ~sum;
+  struct udphdr *udp = (struct udphdr *)(ip + 1);
+  *udp = (struct udphdr){.source = htons(a->udp_dst_port), .dest = htons(a->udp_dst_port),
+                         .len = htons(a->sdu_size - sizeof(*ip))};
+  uint8_t *payload = (uint8_t *)(udp + 1);
+  uint32_t seq = 0;
+  int t_ms = 0;
+  while (!oai_exit) {
+    rnti_t g_rnti[NR_MAX_MBS_GROUPS];
+    int mrb_id[NR_MAX_MBS_GROUPS];
+    int n = 0;
+    NR_SCHED_LOCK(&mac->sched_lock);
+    for (nr_mbs_group_t *const *g = mac->UE_info.mbs_group_list; *g != NULL; g++) {
+      if ((*g)->config.broadcast || (*g)->num_members == 0)
+        continue;
+      if (t_ms % NR_MBS_TEST_STATS_PERIOD_MS == 0)
+        LOG_I(NR_MAC,
+              "MBS test: G-RNTI %04x members %d SDUs injected %u PTM transmissions %lu SDU bytes %lu ACK %lu NACK %lu\n",
+              (*g)->g_rnti, (*g)->num_members, seq, (*g)->ptm_tx, (*g)->ptm_sdu_bytes, (*g)->harq_ack, (*g)->harq_nack);
+      g_rnti[n] = (*g)->g_rnti;
+      mrb_id[n++] = (*g)->config.mrb_id;
+    }
+    NR_SCHED_UNLOCK(&mac->sched_lock);
+    if (n > 0) {
+      /* the first 4 bytes of the payload number the datagrams, so that a receiver can count losses */
+      uint32_t seq_be = htonl(seq++);
+      memcpy(payload, &seq_be, sizeof(seq_be));
+      for (int i = 0; i < n; i++)
+        nr_pdcp_mrb_data_req(NR_PDCP_MBS_CONTEXT_ID(g_rnti[i]), mrb_id[i], sdu, a->sdu_size);
+    }
+    usleep(a->sdu_interval_ms * 1000);
+    t_ms += a->sdu_interval_ms;
+  }
+  return NULL;
 }
 
 static void *nr_mbs_test_thread(void *arg)
@@ -148,7 +209,20 @@ void nr_mbs_test_adapter_init(gNB_MAC_INST *mac, nr_cell_sched_t *cell)
   a->sdu_interval_ms = *gpd(p, np, CONFIG_STRING_MBS_TEST_SDU_INTERVAL)->iptr;
   a->shared_delivery_ue_id = *gpd(p, np, CONFIG_STRING_MBS_TEST_SHARED_DELIVERY_UE)->iptr;
   a->shared_delivery_pdu_session = *gpd(p, np, CONFIG_STRING_MBS_TEST_SHARED_DELIVERY_PDU_SESSION)->iptr;
+  a->join_ues = *gpd(p, np, CONFIG_STRING_MBS_TEST_JOIN_UES)->iptr != 0;
   AssertFatal(a->sdu_size >= sizeof(uint32_t), "MBS test: invalid SDU size\n");
+  if (!a->join_ues) {
+    AssertFatal(a->sdu_interval_ms > 0, "MBS test: join_ues = 0 needs sdu_interval_ms\n");
+    AssertFatal(a->sdu_size >= sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(uint32_t), "MBS test: SDU too small\n");
+    const char *dst = *gpd(p, np, CONFIG_STRING_MBS_TEST_UDP_DST_ADDR)->strptr;
+    AssertFatal(inet_pton(AF_INET, dst, &a->udp_dst_addr) == 1, "MBS test: invalid udp_dst_addr %s\n", dst);
+    a->udp_dst_port = *gpd(p, np, CONFIG_STRING_MBS_TEST_UDP_DST_PORT)->iptr;
+    LOG_W(NR_MAC, "MBS test adapter enabled: UDP datagrams of %d bytes to %s:%d every %d ms on every multicast group with members\n",
+          a->sdu_size, dst, a->udp_dst_port, a->sdu_interval_ms);
+    pthread_t t;
+    threadCreate(&t, nr_mbs_test_feed_thread, a, "MBS_TEST", -1, OAI_PRIORITY_RT_LOW);
+    return;
+  }
   adapter = a;
   if (a->shared_delivery_ue_id > 0)
     nr_sdap_set_dl_redirect(shared_delivery);

@@ -1848,6 +1848,7 @@ static void config_nr_mac_update_cell(nr_cell_sched_t *cell,
   dl_bler_options->lower = *gpd(macrlc_p, macrlc_np, MACRLC_DL_BLER_TARGET_LOWER)->dblptr;
   dl_bler_options->min_mcs = *gpd(macrlc_p, macrlc_np, MACRLC_DL_MIN_MCS)->u8ptr;
   dl_bler_options->max_mcs = *gpd(macrlc_p, macrlc_np, MACRLC_DL_MAX_MCS)->u8ptr;
+  cell->mbs_broadcast_mcs = *gpd(macrlc_p, macrlc_np, MACRLC_MBS_BROADCAST_MCS)->u8ptr;
   if (config->disable_harq)
     dl_bler_options->harq_round_max = 1;
   else

@@ -239,6 +239,38 @@ static int add_pdu_session(char *buf, int debug, telnet_printfunc_t prnt)
   return 0;
 }
 
+/* "TMGI[,UE_ID]": ask the UE to join or leave a multicast MBS session; the TMGI as 12 hex
+ * characters (MBS Service ID, then the PLMN) */
+static int mbs_request(char *buf, telnet_printfunc_t prnt, bool join)
+{
+  char tmgi[13] = {0};
+  int ue_id = -1;
+  if (!buf || sscanf(buf, "%12[0-9a-fA-F],%d", tmgi, &ue_id) < 1)
+    ERROR_MSG_RET("Invalid format: expected TMGI(12 hex)[,UE_ID]\n");
+  if (ue_id < 0)
+    ue_id = get_default_ue_id();
+  if (ue_id < 0)
+    ERROR_MSG_RET("No default UE context found\n");
+  static const char *why[] = {"", "TMGI is not 12 hex characters", "no NAS security context", "no active PDU session", "could not build the message"};
+  int ret = nas_mbs_request(ue_id, tmgi, join);
+  if (ret < 0)
+    ERROR_MSG_RET("MBS %s not sent: %s\n", join ? "join" : "leave", why[-ret]);
+  prnt("UE %d asked to %s multicast MBS session TMGI %s\n", ue_id, join ? "join" : "leave", tmgi);
+  return 0;
+}
+
+static int mbs_join(char *buf, int debug, telnet_printfunc_t prnt)
+{
+  UNUSED(debug);
+  return mbs_request(buf, prnt, true);
+}
+
+static int mbs_leave(char *buf, int debug, telnet_printfunc_t prnt)
+{
+  UNUSED(debug);
+  return mbs_request(buf, prnt, false);
+}
+
 /* Telnet shell command definitions */
 static telnetshell_cmddef_t cicmds[] = {
   {"sync_state", "[UE_ID(int,opt)]", get_sync_state},
@@ -249,6 +281,8 @@ static telnetshell_cmddef_t cicmds[] = {
   {"deregistration", "", force_deregistration},
   {"get_max_dl_toa", "[ant]", get_dl_toa},
   {"add_pdu_session", "[PDUSessionID(int)],[UE_ID(int,opt)]", add_pdu_session},
+  {"mbs_join", "[TMGI(12 hex)],[UE_ID(int,opt)]", mbs_join},
+  {"mbs_leave", "[TMGI(12 hex)],[UE_ID(int,opt)]", mbs_leave},
   {"", "", NULL},
 };
 

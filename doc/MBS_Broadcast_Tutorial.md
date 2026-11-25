@@ -2,6 +2,11 @@
 
 # MBS broadcast tutorial
 
+> This work is part of the ESA activity **AD-SAT** (*Provision of Broadband
+> Control Centre Services for Autonomous Driving over Satellite
+> Constellations*, activity 3F.049) with Frequentis AG. See the
+> [project page](https://connectivity.esa.int/?p=26285).
+
 One gNB sends a single transmission on a G-RNTI and three UEs receive it.
 Unlike [MBS.md](./MBS.md), which drives the group from a test adapter, here
 the session comes from the core: the MB-SMF creates a broadcast session, the
@@ -32,7 +37,8 @@ What runs here is broadcast:
   is connected, and a UE keeps receiving in RRC_IDLE.
 
 HARQ feedback is off, because a broadcast session has no members to report
-with, and the session is sent at a fixed MCS for the same reason. Multicast,
+with, and the session is sent at a fixed MCS for the same reason: 9 unless
+`mbs_broadcast_mcs` in the `MACRLCs` section says otherwise. Multicast,
 where feedback is on, is described in [MBS.md](./MBS.md).
 
 The remaining specification gaps are listed under
@@ -58,10 +64,18 @@ The remaining specification gaps are listed under
 
 ## The core network
 
-Use the 5G-MAG fork of Open5GS, which adds the MBS functions:
+A ready image of the core described below is on Docker Hub:
 
 ```bash
-git clone --branch 5mbs https://github.com/5G-MAG/open5gs.git
+docker pull phinetech/open5gs_core:mbs
+docker tag phinetech/open5gs_core:mbs open5gs_core:mbs
+```
+
+With it, continue at [Build the images](#build-the-images). To build the core
+yourself, use the 5G-MAG fork of Open5GS, which adds the MBS functions:
+
+```bash
+git clone --branch 5mbs-development https://github.com/5G-MAG/open5gs.git
 ```
 
 Build it the way Open5GS documents (`meson` and `ninja`); the fork adds no
@@ -87,12 +101,15 @@ policy during registration, and without it every UE is rejected with cause 95,
 It also needs MongoDB to be up before it starts, so the compose file waits for
 the database to answer before starting the core.
 
-Two more things the core needs for this tutorial: a `tun` interface for the
-user plane (`ogstun`, as Open5GS documents), and a multicast routing daemon
-such as `smcrouted`, used below to route the group into that interface.
+The core also needs a `tun` interface for the user plane (`ogstun`, as
+Open5GS documents). The MB-UPF routes the session's multicast group into it
+by itself (`upf.mbs.multicast_router` in `core.yaml`); for that it needs the
+kernel's multicast routing to itself, so do not run a routing daemon such as
+`smcrouted` next to it.
 
-Package the result however you like and point the compose file at it with
-`CN_IMG`. What the compose file expects of that image:
+Package the result however you like. The compose file expects the image as
+`open5gs_core:mbs`; to use another name, set `CN_IMG`. What it expects of
+that image:
 
 * the core reachable at `192.168.77.10`, with the AMF listening for NGAP and
   the SMF's service-based interface on `127.0.0.4:7777`;
@@ -137,35 +154,31 @@ check the core first — see the note on `open5gs-pcfd` above.
 
 ## Create the broadcast session
 
-The MB-SMF allocates the TMGI and tells the gNB over NGAP. `239.0.0.25` is
-the address the application sends to.
+The MB-SMF allocates the TMGI and tells the gNB over NGAP. The application
+server `mbs-as` (`192.168.77.20`) sends to `239.0.0.25`; together they are the
+source-specific multicast address of the session.
 
 ```bash
 docker exec mbs-cn curl -s --http2-prior-knowledge -X POST \
   -H 'Content-Type: application/json' \
-  -d '{"mbsSession":{"ssm":{"sourceIpAddr":{"ipv4Addr":"192.168.77.10"},
+  -d '{"mbsSession":{"ssm":{"sourceIpAddr":{"ipv4Addr":"192.168.77.20"},
        "destIpAddr":{"ipv4Addr":"239.0.0.25"}},"tmgiAllocReq":true,
-       "serviceType":"BROADCAST"}}' \
+       "serviceType":"BROADCAST","snssai":{"sst":1},
+       "mbsServiceArea":{"tais":[{"plmnId":{"mcc":"999","mnc":"70"},"tac":"000001"}]}}}' \
   127.0.0.4:7777/nmbsmf-mbssession/v1/mbs-sessions
-```
-
-Route the group into the core's tunnel interface:
-
-```bash
-docker exec mbs-cn smcroutectl add eth0 239.0.0.25 ogstun
 ```
 
 The gNB log now shows the session arriving and the group being created:
 
 ```
-[NGAP]   Broadcast session setup: TMGI 202621000000 (6 octets)
-[NGAP]   Broadcast session user plane: group 239.0.0.4 source 192.168.55.5 C-TEID 0x00007742
+[NGAP]   Broadcast session setup: TMGI bed4da99f907 (6 octets)
+[NGAP]   Broadcast session user plane: group 239.0.0.4 source 192.168.77.10 C-TEID 0x00002b17
 [NGAP]   Broadcast session setup acknowledged
-[E1AP]   MBS: broadcast bearer context for TMGI 202621000000, MRB 1, SST 1
-[GTPU]   MBS: joined group 239.0.0.4 on 192.168.77.101, port 2152
-[GTPU]   MBS: listening for the broadcast session on TEID 0x7742
+[E1AP]   MBS: broadcast bearer context for TMGI bed4da99f907, MRB 1, SST 1
+[GTPU]   MBS: joined group 239.0.0.4 from 192.168.77.10 on 192.168.77.101, port 2152
+[GTPU]   MBS: listening for the broadcast session on TEID 0x2b17
 [RLC]    fb30: added PTM RLC entity of MRB 1 on LCID 32
-[NR_MAC] added MBS broadcast session G-RNTI fb30: LCID 32, HARQ feedback disabled, PTM HARQ processes 0xf000
+[NR_MAC] added MBS broadcast session G-RNTI fb30: LCID 32, HARQ feedback disabled, PTM HARQ processes 0xf000, DCI 4_1
 [PDCP]   10000fb30: added MRB 1 (SN size 12)
 ```
 
@@ -175,7 +188,7 @@ it reads SIB20, within a second or two, and says so in its own log:
 ```
 [RLC]    0000: added PTM RLC entity of MRB 32 on LCID 32
 [PDCP]   0: added MRB 32 (SN size 12)
-[NR_RRC] MBS: broadcast session with service ID 202621 announced on G-RNTI fb30, MTCH on LCID 32
+[NR_RRC] MBS: broadcast session with service ID bed4da announced on G-RNTI fb30, MTCH on LCID 32
 ```
 
 Note the group address the core chose (`239.0.0.4` above) is not the one the
@@ -183,21 +196,23 @@ application sends to: the core distributes the session to a group of its own.
 
 ## Send traffic and watch it arrive
 
-What a UE receives on the group is written to `oaitun_ue1`, so counting the
-packets the interface took in is enough; the UEs are otherwise idle. Read the
+What a UE receives on a broadcast session is written to its broadcast
+interface, `oaimbs_ue1` (address 169.254.0.1, link-local and not routed): a
+broadcast session belongs to no PDU session, so it does not go to
+`oaitun_ue1`. Counting the packets the interface took in is enough. Read the
 counter before sending:
 
 ```bash
 for n in 1 2 3; do
-  docker exec mbs-ue$n cat /sys/class/net/oaitun_ue1/statistics/rx_packets > /tmp/ue$n.before
+  docker exec mbs-ue$n cat /sys/class/net/oaimbs_ue1/statistics/rx_packets > /tmp/ue$n.before
 done
 ```
 
-Send twenty packets from the core:
+Send twenty packets from the application server:
 
 ```bash
 for i in $(seq 20); do
-  docker exec mbs-cn sendip -p ipv4 -is 192.168.77.10 -id 239.0.0.25 239.0.0.25
+  docker exec mbs-as sendip -p ipv4 -is 192.168.77.20 -id 239.0.0.25 239.0.0.25
   sleep 0.2
 done
 ```
@@ -206,7 +221,7 @@ Count what each UE received:
 
 ```bash
 for n in 1 2 3; do
-  after=$(docker exec mbs-ue$n cat /sys/class/net/oaitun_ue1/statistics/rx_packets)
+  after=$(docker exec mbs-ue$n cat /sys/class/net/oaimbs_ue1/statistics/rx_packets)
   echo "ue$n: $((after - $(cat /tmp/ue$n.before))) of 20"
 done
 ```
@@ -228,8 +243,32 @@ The gNB counts what it sent in its periodic statistics, and does so with no
 UE in the cell as well:
 
 ```
-MBS broadcast session G-RNTI fb30: 20 PTM transmissions, 700 bytes, MCS 9
+MBS broadcast session G-RNTI fb30: 20 PTM transmissions, 460 bytes, MCS 9
 ```
+
+## Release the session
+
+Delete the session at the core:
+
+```bash
+docker exec mbs-cn curl -s --http2-prior-knowledge -X DELETE \
+  127.0.0.4:7777/nmbsmf-mbssession/v1/mbs-sessions/1
+```
+
+The core sends `BroadcastSessionReleaseRequest`. The gNB leaves the group and
+removes the session from SIB20, and every UE stops receiving it the next time
+it reads SIB20:
+
+```
+[NGAP]   Broadcast Session Release initiating message
+[E1AP]   MBS: broadcast user plane released, TEID 0x2b17
+[NR_MAC] MBS: broadcast session for TMGI bed4da99f907 released, G-RNTI f738
+[NR_RRC] MBS: broadcast session with MTCH on LCID 32 not announced anymore
+```
+
+A session created afterwards is announced and received like the first one.
+The gNB can also release a session without the core, through the telnet
+command `rrc release_mbs_broadcast`.
 
 ## Stop
 
@@ -251,7 +290,6 @@ the next start.
   rather than having a broadcast process of its own. The gNB therefore keeps
   four HARQ processes of every connected UE away from unicast while a
   session exists.
-* **The UE delivers what it receives to the interface of its first PDU
-  session**, as it has no interface for MBS sessions. A UE that never had a
-  PDU session receives the session but has nowhere to deliver it.
-* The MCS of a session is fixed in the code (9).
+* **An OAI UE whose registration is rejected stops reading system
+  information**, so it does not find a broadcast session either, although
+  the broadcast interface needs no registration.

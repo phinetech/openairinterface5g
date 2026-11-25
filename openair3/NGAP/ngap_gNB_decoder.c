@@ -103,12 +103,24 @@ static int ngap_gNB_decode_initiating_message(NGAP_NGAP_PDU_t *pdu) {
       NGAP_INFO("DL NON UE Associated NRPPA Transport initiating message\n");
       break;
 
+    case NGAP_ProcedureCode_id_BroadcastSessionRelease:
+      NGAP_INFO("Broadcast Session Release initiating message\n");
+      break;
+
     case NGAP_ProcedureCode_id_BroadcastSessionSetup:
       res = asn_encode_to_new_buffer(NULL, ATS_CANONICAL_XER, &asn_DEF_NGAP_NGAP_PDU, pdu);
       free(res.buffer);
       NGAP_INFO("Broadcast Session Setup initiating message\n");
       /* Decoded here; the handler that acts on it arrives with the broadcast
        * session setup commit. */
+      break;
+
+    case NGAP_ProcedureCode_id_MulticastSessionActivation:
+      NGAP_INFO("Multicast Session Activation initiating message\n");
+      break;
+
+    case NGAP_ProcedureCode_id_MulticastSessionDeactivation:
+      NGAP_INFO("Multicast Session Deactivation initiating message\n");
       break;
 
     default:

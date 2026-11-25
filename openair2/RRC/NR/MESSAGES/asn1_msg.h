@@ -29,6 +29,7 @@
 #include "NR_RadioBearerConfig.h"
 #include "NR_ReestablishmentCause.h"
 #include "NR_SRB-ToAddModList.h"
+#include "NR_MRB-ToAddModList-r17.h"
 #include "NR_SecurityConfig.h"
 #include "NR_MeasurementReport.h"
 #include "NR_MeasurementTimingConfiguration.h"
@@ -48,6 +49,9 @@ typedef struct {
   uint8_t transaction_id;
   NR_SRB_ToAddModList_t *srb_config_list;
   NR_DRB_ToAddModList_t *drb_config_list;
+  NR_MRB_ToAddModList_r17_t *mrb_config_list;
+  long mrb_rel[8];
+  int n_mrb_rel;
   int *drb_rel;
   int n_drb_rel;
   NR_SecurityConfig_t *security_config;

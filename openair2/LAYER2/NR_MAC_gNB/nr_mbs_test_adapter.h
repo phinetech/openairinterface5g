@@ -12,7 +12,12 @@
  *   shared_delivery_pdu_session of the UE shared_delivery_ue_id (gNB-CU UE ID) is delivered on the MRB, and/or
  *   numbered test SDUs are sent every sdu_interval_ms.
  * It only uses the MAC, RLC and PDCP MBS interfaces that the real procedures will use, and does nothing unless the
- * optional MBS_TEST section is present in the configuration file. */
+ * optional MBS_TEST section is present in the configuration file.
+ *
+ * With join_ues = 0, the UEs join through the real procedure (NAS join, then the gNB-CU configures them) and the
+ * adapter only stands in for the shared N3 tunnel: it creates no group, and sends its numbered test SDUs on every
+ * multicast group that has members. The SDUs are then IPv4/UDP datagrams to udp_dst_addr:udp_dst_port, so that an
+ * application on the UE can receive and count them. */
 
 #ifndef NR_MBS_TEST_ADAPTER_H
 #define NR_MBS_TEST_ADAPTER_H
@@ -29,6 +34,9 @@
 #define CONFIG_STRING_MBS_TEST_SDU_INTERVAL "sdu_interval_ms"
 #define CONFIG_STRING_MBS_TEST_SHARED_DELIVERY_UE "shared_delivery_ue_id"
 #define CONFIG_STRING_MBS_TEST_SHARED_DELIVERY_PDU_SESSION "shared_delivery_pdu_session"
+#define CONFIG_STRING_MBS_TEST_JOIN_UES "join_ues"
+#define CONFIG_STRING_MBS_TEST_UDP_DST_ADDR "udp_dst_addr"
+#define CONFIG_STRING_MBS_TEST_UDP_DST_PORT "udp_dst_port"
 
 // clang-format off
 #define MBS_TEST_PARAMS_DESC { \
@@ -41,6 +49,9 @@
   {CONFIG_STRING_MBS_TEST_SDU_INTERVAL,                "test SDU period ms\n",  0, .iptr = NULL, .defintval = 0,    TYPE_INT, 0}, \
   {CONFIG_STRING_MBS_TEST_SHARED_DELIVERY_UE,          "shared delivery UE\n",  0, .iptr = NULL, .defintval = 0,    TYPE_INT, 0}, \
   {CONFIG_STRING_MBS_TEST_SHARED_DELIVERY_PDU_SESSION, "its PDU session\n",     0, .iptr = NULL, .defintval = 1,    TYPE_INT, 0}, \
+  {CONFIG_STRING_MBS_TEST_JOIN_UES,                    "create a group, all UEs join\n", 0, .iptr = NULL, .defintval = 1, TYPE_INT, 0}, \
+  {CONFIG_STRING_MBS_TEST_UDP_DST_ADDR,                "test datagram group\n", 0, .strptr = NULL, .defstrval = "239.0.0.1", TYPE_STRING, 0}, \
+  {CONFIG_STRING_MBS_TEST_UDP_DST_PORT,                "test datagram port\n",  0, .iptr = NULL, .defintval = 12345, TYPE_INT, 0}, \
 }
 // clang-format on
 

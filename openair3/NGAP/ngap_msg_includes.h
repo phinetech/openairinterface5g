@@ -117,4 +117,21 @@
 #include "NGAP_SharedNGU-MulticastTNLInformation.h"
 #include "NGAP_TransportLayerAddress.h"
 
+/* MBS multicast: the per-UE association of a PDU session with a multicast MBS session, and the
+ * non-UE-associated activation of that session. */
+#include "NGAP_MBS-SessionID.h"
+#include "NGAP_MBSSessionSetuporModifyRequestList.h"
+#include "NGAP_MBSSessionSetuporModifyRequestItem.h"
+#include "NGAP_MBSSessionToReleaseList.h"
+#include "NGAP_MBSSessionToReleaseItem.h"
+#include "NGAP_MBSSessionSetupResponseList.h"
+#include "NGAP_MBSSessionSetupResponseItem.h"
+#include "NGAP_MBS-SupportIndicator.h"
+#include "NGAP_MulticastSessionActivationRequest.h"
+#include "NGAP_MulticastSessionActivationRequestTransfer.h"
+#include "NGAP_MulticastSessionActivationResponse.h"
+#include "NGAP_MulticastSessionActivationFailure.h"
+#include "NGAP_ProtocolExtensionContainer.h"
+#include "NGAP_ProtocolExtensionField.h"
+
 #endif // NGAP_MSG_INCLUDES_H

@@ -206,6 +206,17 @@ typedef struct {
   uint32_t c_teid;
 } mbs_session_transfer_t;
 
+/* How many multicast MBS sessions one PDU session can be associated with in one modification.
+ * TS 38.413 V17.10.0 allows maxnoofMBSSessions (256) per list; this is what the gNB keeps per UE. */
+#define MAX_MBS_SESSIONS 8
+
+/* MBS Session ID (9.3.1.188 3GPP TS 38.413): the TMGI, and the NID of an SNPN which this build has no
+ * use for. The TMGI is 6 octets -- 3 of MBS Service ID then the PLMN -- and is the session's identity
+ * everywhere: on N2, in SIB20, and in the NAS containers the UE exchanges with the SMF. */
+typedef struct mbs_session_id_s {
+  uint8_t tmgi[6];
+} mbs_session_id_t;
+
 typedef enum pdusession_qosflow_mapping_ind_e{
   QOSFLOW_MAPPING_INDICATION_UL = 0,
   QOSFLOW_MAPPING_INDICATION_DL = 1,
@@ -249,6 +260,10 @@ typedef struct pdusession_modify_s {
   uint8_t nb_of_qos_flow;
   // qos_flow_add_or_modify
   qos_flow_addmod_response_item_t qos[MAX_QOS_FLOWS];
+  /* MBS Session Setup or Modify Response List (ProtocolIE-ID 313), an extension of the response
+   * transfer: the MBS sessions the association was accepted for. */
+  uint8_t nb_mbs_setup_modify;
+  mbs_session_id_t mbs_setup_modify[MAX_MBS_SESSIONS];
 } pdusession_modify_t;
 
 /* Cause Group (9.3.1.2 of 3GPP TS 38.413) */
@@ -968,6 +983,16 @@ typedef struct {
   // QoS Flow to Release List (Optional)
   uint8_t nb_qos_to_release;
   qos_flow_to_release_t qos_to_release[MAX_QOS_FLOWS];
+  /* MBS Session Setup or Modify Request List (Optional, ProtocolIE-ID 319). The multicast MBS
+   * sessions this PDU session is being associated with -- a UE joining them, in the words of
+   * TS 23.247 V18.8.0 clause 7.2.1.3 step 5: "the relation between the Multicast MBS Session Context
+   * and the UE's PDU Session context". */
+  uint8_t nb_mbs_to_setup_modify;
+  mbs_session_id_t mbs_to_setup_modify[MAX_MBS_SESSIONS];
+  /* MBS Session To Release List (Optional, TS 38.413 V17.10.0 clause 9.3.1.215): the multicast MBS
+   * sessions the UE leaves (TS 23.247 V18.8.0 clause 7.2.2.2 step 7). */
+  uint8_t nb_mbs_to_release;
+  mbs_session_id_t mbs_to_release[MAX_MBS_SESSIONS];
 } pdusession_mod_req_transfer_t;
 
 /* PDU Session Resource Setup/Modify Request Item */

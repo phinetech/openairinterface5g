@@ -225,6 +225,44 @@ int ngap_gNB_pdusession_modify_resp(instance_t instance, ngap_pdusession_modify_
           qos->qosFlowIdentifier = pdusession_modify_resp_p->pdusessions[i].qos[qos_flow_index].qfi;
         }
       }
+
+      /* MBS Session Setup or Modify Response List (TS 38.413 V17.10.0, ProtocolIE-ID 313): which
+       * multicast MBS sessions this PDU session was accepted into. It is an *extension* of the
+       * response transfer, not one of its fields -- the Rel-17 MBS IEs were added to a message that
+       * already existed -- so it goes into the extension container.
+       *
+       * TS 23.247 V18.8.0 clause 7.2.1.3 step 9: "If the MBS is supported by NG-RAN, the N2 SM
+       * information further includes the indication of supporting MBS", which is the
+       * id-MBS-SupportIndicator extension beside this one. Both are sent: a core that gets the
+       * session list without the indicator cannot tell shared delivery from the individual-delivery
+       * fall-back. */
+      if (pdusession_modify_resp_p->pdusessions[i].nb_mbs_setup_modify > 0) {
+        NGAP_ProtocolExtensionContainer_12929P232_t *ext =
+            calloc_or_fail(1, sizeof(*ext));
+        transfer.iE_Extensions = (struct NGAP_ProtocolExtensionContainer *)ext;
+
+        {
+          asn1cSequenceAdd(ext->list, NGAP_PDUSessionResourceModifyResponseTransfer_ExtIEs_t, mbs_ext);
+          mbs_ext->id = NGAP_ProtocolIE_ID_id_MBS_SupportIndicator;
+          mbs_ext->criticality = NGAP_Criticality_ignore;
+          mbs_ext->extensionValue.present =
+              NGAP_PDUSessionResourceModifyResponseTransfer_ExtIEs__extensionValue_PR_MBS_SupportIndicator;
+          mbs_ext->extensionValue.choice.MBS_SupportIndicator = NGAP_MBS_SupportIndicator_true;
+        }
+        {
+          asn1cSequenceAdd(ext->list, NGAP_PDUSessionResourceModifyResponseTransfer_ExtIEs_t, mbs_ext);
+          mbs_ext->id = NGAP_ProtocolIE_ID_id_MBSSessionSetuporModifyResponseList;
+          mbs_ext->criticality = NGAP_Criticality_ignore;
+          mbs_ext->extensionValue.present =
+              NGAP_PDUSessionResourceModifyResponseTransfer_ExtIEs__extensionValue_PR_MBSSessionSetupResponseList;
+          NGAP_MBSSessionSetupResponseList_t *list = &mbs_ext->extensionValue.choice.MBSSessionSetupResponseList;
+          for (int m = 0; m < pdusession_modify_resp_p->pdusessions[i].nb_mbs_setup_modify; m++) {
+            asn1cSequenceAdd(list->list, NGAP_MBSSessionSetupResponseItem_t, item_mbs);
+            const uint8_t *tmgi = pdusession_modify_resp_p->pdusessions[i].mbs_setup_modify[m].tmgi;
+            OCTET_STRING_fromBuf(&item_mbs->mBS_SessionID.tMGI, (const char *)tmgi, 6);
+          }
+        }
+      }
       void *buf = NULL;
       ssize_t encoded = aper_encode_to_new_buffer(&asn_DEF_NGAP_PDUSessionResourceModifyResponseTransfer, NULL, &transfer, &buf);
       if (encoded < 0) {

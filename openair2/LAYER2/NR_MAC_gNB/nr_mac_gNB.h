@@ -871,7 +871,8 @@ typedef enum {
   MSG3_CRNTI,
   BWP_SWITCH,
   BEAM_SWITCH,
-  MBS_JOIN
+  MBS_JOIN,
+  MBS_LEAVE
 } reconfig_trigger_state_t;
 
 typedef struct {
@@ -980,6 +981,10 @@ typedef struct nr_mbs_group {
   /// C-RNTIs of the UEs that receive the session
   int num_members;
   rnti_t member[MAX_MOBILES_PER_GNB];
+  /// C-RNTIs of UEs that joined or left while another reconfiguration of theirs was ongoing, applied when it is over
+  int num_pending;
+  rnti_t pending[MAX_MOBILES_PER_GNB];
+  bool pending_leave[MAX_MOBILES_PER_GNB];
   /// DL HARQ processes reserved for PTM, also set in ptm_dl_harq_mask of every member
   uint32_t harq_mask;
   nr_mbs_harq_t harq[NR_MAX_HARQ_PROCESSES];
@@ -1438,6 +1443,8 @@ typedef struct nr_cell_sched_s {
   NR_sched_pdsch_t sib1_pdsch[MAX_NUM_OF_SSB];
   periodic_ue_sched_t periodic_srs_config;
 
+  /// MCS of the MBS broadcast sessions of the cell (mbs_broadcast_mcs)
+  int mbs_broadcast_mcs;
   /// CORESET and Type-3 CSS of pdcch-ConfigMulticast in the CFR for DCI format 4_1 with CRC scrambled by G-RNTI
   /// (TS 38.213 §10.1)
   NR_ControlResourceSet_t *mbs_coreset;

@@ -5,6 +5,8 @@
 #ifndef CUCP_CUUP_HANDLER_H
 #define CUCP_CUUP_HANDLER_H
 
+#include <stdint.h>
+
 #include <stdbool.h>
 
 void nr_pdcp_e1_if_init(bool uses_e1);
@@ -16,6 +18,7 @@ struct e1ap_bearer_release_cmd_s;
 struct e1ap_bc_bearer_setup_req_s;
 void e1_bearer_context_setup(const struct e1ap_bearer_setup_req_s *req);
 void e1_bc_bearer_context_setup(const struct e1ap_bc_bearer_setup_req_s *req);
+void e1_bc_bearer_context_release(uint32_t gNB_cu_cp_mbs_e1ap_id);
 void e1_bearer_context_modif(const struct e1ap_bearer_mod_req_s *req);
 void e1_bearer_context_mod_confirm(const struct e1ap_bearer_mod_confirm_s *conf);
 void e1_bearer_release_cmd(const struct e1ap_bearer_release_cmd_s *cmd);

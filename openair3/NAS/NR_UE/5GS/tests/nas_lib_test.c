@@ -17,6 +17,9 @@
 #include "FGSNASSecurityModeReject.h"
 #include "fgmm_authentication_reject.h"
 #include "nr_nas_msg.h"
+#include "MbsContainers.h"
+#include "PduSessionModificationRequest.h"
+#include "PduSessionModificationCommand.h"
 
 configmodule_interface_t *uniqCfg = NULL;
 
@@ -486,6 +489,141 @@ static void test_msg_headers(void)
   AssertFatal(decode_5gsm_msg_header(&sm_header, sm, sizeof(sm) - 1) < 0, "decode_5gsm_msg_header() accepted a truncated header\n");
 }
 
+/** @brief The Requested MBS container the UE sends to join a multicast MBS session
+ *         (TS 24.501 clause 9.11.4.30), and the whole PDU Session Modification Request around it
+ *         (clause 8.3.7). Checked against the octets the clause prescribes, because the SMF decodes
+ *         them by offset and a wrong bit order is not visible in any log. */
+static void test_mbs_join_request(void)
+{
+  requested_mbs_info_t info = {.operation = MBS_OP_JOIN, .tmgi = {0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07}};
+  uint8_t buf[64] = {0};
+
+  /* octet 4: bits 1-2 = ID type 01 (TMGI), bits 3-4 = operation 01 (join) -> 0x05 */
+  int len = encode_requested_mbs_container(buf, sizeof(buf), &info, 1);
+  AssertFatal(len == 7, "Requested MBS container: expected 7 octets, got %d\n", len);
+  AssertFatal(buf[0] == 0x05, "Requested MBS container: octet 4 is 0x%02x, expected 0x05\n", buf[0]);
+  AssertFatal(memcmp(buf + 1, info.tmgi, MBS_TMGI_LEN) == 0, "Requested MBS container: wrong TMGI\n");
+
+  /* a leave is operation 10 -> 0x09 */
+  info.operation = MBS_OP_LEAVE;
+  AssertFatal(encode_requested_mbs_container(buf, sizeof(buf), &info, 1) == 7, "encode failed\n");
+  AssertFatal(buf[0] == 0x09, "Requested MBS container: a leave is 0x%02x, expected 0x09\n", buf[0]);
+
+  /* it refuses to write past the buffer rather than truncating the IE */
+  AssertFatal(encode_requested_mbs_container(buf, 6, &info, 1) == -1, "encode accepted a short buffer\n");
+
+  /* the whole message: 4 octets of 5GSM header, then the container as a type 6 IE (IEI, 2 octets of
+   * length, contents) */
+  pdu_session_modification_request_msg msg = {
+      .protocoldiscriminator = FGS_SESSION_MANAGEMENT_MESSAGE,
+      .pdusessionid = 1,
+      .pti = 1,
+      .pdusessionmodificationrequestmsgtype = FGS_PDU_SESSION_MODIFICATION_REQ,
+      .requested_mbs_present = true,
+      .num_requested_mbs = 1,
+  };
+  msg.requested_mbs[0].operation = MBS_OP_JOIN;
+  memcpy(msg.requested_mbs[0].tmgi, info.tmgi, MBS_TMGI_LEN);
+
+  const uint8_t expected[] = {
+      FGS_SESSION_MANAGEMENT_MESSAGE, 1, 1, FGS_PDU_SESSION_MODIFICATION_REQ,
+      0x70, 0x00, 0x07,
+      0x05, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07,
+  };
+  len = encode_pdu_session_modification_request(&msg, buf, sizeof(buf));
+  AssertFatal(len == (int)sizeof(expected), "Modification Request: %d octets, expected %zu\n", len, sizeof(expected));
+  AssertFatal(memcmp(buf, expected, sizeof(expected)) == 0, "Modification Request: encoding mismatch\n");
+}
+
+/** @brief The Received MBS container the SMF answers with (TS 24.501 clause 9.11.4.31), decoded out
+ *         of a PDU Session Modification Command. */
+static void test_mbs_join_answer(void)
+{
+  received_mbs_container_t out = {0};
+
+  /* accepted: MD = 010, nothing optional */
+  {
+    const uint8_t buf[] = {0x02, 0x00, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07};
+    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
+    AssertFatal(out.num == 1, "expected 1 entry, got %d\n", out.num);
+    AssertFatal(out.info[0].decision == MBS_DECISION_JOIN_ACCEPTED, "expected accepted, got %d\n", out.info[0].decision);
+    AssertFatal(memcmp(out.info[0].tmgi, buf + 2, MBS_TMGI_LEN) == 0, "wrong TMGI\n");
+  }
+
+  /* rejected with "session context not found": MD = 011, cause = 101 in bits 6-8 */
+  {
+    const uint8_t buf[] = {(5 << 5) | 3, 0x00, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07};
+    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
+    AssertFatal(out.info[0].decision == MBS_DECISION_JOIN_REJECTED, "expected rejected\n");
+    AssertFatal(out.info[0].reject_cause == MBS_REJECT_CONTEXT_NOT_FOUND, "wrong rejection cause\n");
+  }
+
+  /* two entries back to back */
+  {
+    const uint8_t buf[] = {
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07,
+        (2 << 5) | 3, 0x00, 0x00, 0x00, 0x02, 0x99, 0xf9, 0x07,
+    };
+    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
+    AssertFatal(out.num == 2, "expected 2 entries, got %d\n", out.num);
+    AssertFatal(out.info[1].reject_cause == MBS_REJECT_NOT_AUTHORIZED, "wrong rejection cause\n");
+    AssertFatal(out.info[1].tmgi[2] == 0x02, "wrong TMGI in the second entry\n");
+  }
+
+  /* the optional fields are skipped over, so the entry after them is still found: IPAE=1 with IPv4
+   * (8 octets of addresses) and an MBS back-off timer (MTI=10, 1 octet) */
+  {
+    const uint8_t buf[] = {
+        0x02, 0x01 | (2 << 1), 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07,
+        192, 168, 77, 20, 239, 0, 0, 25,
+        0x3c,
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x99, 0xf9, 0x07,
+    };
+    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
+    AssertFatal(out.num == 2, "expected 2 entries past the optional fields, got %d\n", out.num);
+    AssertFatal(out.info[1].tmgi[2] == 0x02, "wrong TMGI in the second entry\n");
+  }
+
+  /* a truncated entry is a malformed IE, not a short read */
+  {
+    const uint8_t buf[] = {0x02, 0x00, 0xab, 0xcd};
+    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == -1, "a truncated container was accepted\n");
+  }
+
+  /* an entry whose optional fields run past the IE is refused too */
+  {
+    const uint8_t buf[] = {0x02, 0x01, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07, 1, 2};
+    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == -1, "an overrunning container was accepted\n");
+  }
+
+  /* and the IE in its message: a PDU Session Modification Command whose only IE is 0x71 */
+  {
+    const uint8_t cmd[] = {0x71, 0x00, 0x08, 0x02, 0x00, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07};
+    pdu_session_modification_command_msg_t msg = {0};
+    AssertFatal(decode_pdu_session_modification_command(&msg, (uint8_t *)cmd, sizeof(cmd)) == (int)sizeof(cmd),
+                "decode_pdu_session_modification_command() failed\n");
+    AssertFatal(msg.received_mbs_present, "the Received MBS container was not reported\n");
+    AssertFatal(msg.received_mbs.num == 1 && msg.received_mbs.info[0].decision == MBS_DECISION_JOIN_ACCEPTED,
+                "the Received MBS container was not decoded\n");
+  }
+}
+
+/** @brief --mbs-join takes 12 hex characters of TMGI, of either case. */
+static void test_mbs_tmgi_from_string(void)
+{
+  uint8_t tmgi[MBS_TMGI_LEN] = {0};
+  const uint8_t expected[MBS_TMGI_LEN] = {0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07};
+
+  AssertFatal(mbs_tmgi_from_string("abcdef99f907", tmgi), "a lowercase TMGI was refused\n");
+  AssertFatal(memcmp(tmgi, expected, MBS_TMGI_LEN) == 0, "wrong octets from a lowercase TMGI\n");
+  AssertFatal(mbs_tmgi_from_string("ABCDEF99F907", tmgi), "an uppercase TMGI was refused\n");
+  AssertFatal(memcmp(tmgi, expected, MBS_TMGI_LEN) == 0, "wrong octets from an uppercase TMGI\n");
+  AssertFatal(!mbs_tmgi_from_string("abcdef99f90", tmgi), "a short TMGI was accepted\n");
+  AssertFatal(!mbs_tmgi_from_string("abcdef99f9077", tmgi), "a long TMGI was accepted\n");
+  AssertFatal(!mbs_tmgi_from_string("abcdef99f90g", tmgi), "a non-hex TMGI was accepted\n");
+  AssertFatal(!mbs_tmgi_from_string(NULL, tmgi), "NULL was accepted\n");
+}
+
 int main()
 {
   // Initialize logging system
@@ -502,5 +640,8 @@ int main()
   test_auth_reject();
   test_security_mode_reject();
   test_msg_headers();
+  test_mbs_join_request();
+  test_mbs_join_answer();
+  test_mbs_tmgi_from_string();
   return 0;
 }

@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include "fgs_nas_utils.h"
 #include "fgsm_lib.h"
+#include "MbsContainers.h"
 
 /* PDU Session Modification Command Optional IE Identifiers - TS 24.501 Table 8.3.9.1.1 */
 
@@ -20,7 +21,8 @@
   IEI_DEF(IEI_MOD_AUTH_QOS_RULES, 0x7A) /* QoS rules 9.11.4.13 */                     \
   IEI_DEF(IEI_MOD_MAPPED_EPS, 0x75) /* Mapped EPS bearer contexts */                  \
   IEI_DEF(IEI_MOD_AUTH_QOS_DESC, 0x79) /* QoS flow descriptions 9.11.4.12 */          \
-  IEI_DEF(IEI_MOD_EXT_CONF_OPT, 0x7B) /* Extended protocol config options */
+  IEI_DEF(IEI_MOD_EXT_CONF_OPT, 0x7B) /* Extended protocol config options */                \
+  IEI_DEF(IEI_MOD_RECEIVED_MBS_CONTAINER, 0x71) /* Received MBS container 9.11.4.31 */
 
 static const text_info_t mod_iei_text_desc[] = {FOREACH_MOD_IEI(TO_TEXT)};
 
@@ -43,6 +45,10 @@ typedef struct pdu_session_modification_command_msg_s {
   // Extended Protocol Configuration Options (O)
   ext_pP_t ext_pp_ie;
   bool ext_pp_present;
+  // Received MBS container (O): what the network decided about the multicast MBS sessions the UE
+  // asked to join or leave (TS 24.501 clause 6.3.2.3)
+  received_mbs_container_t received_mbs;
+  bool received_mbs_present;
 } pdu_session_modification_command_msg_t;
 
 int decode_pdu_session_modification_command(pdu_session_modification_command_msg_t *psmc_msg,

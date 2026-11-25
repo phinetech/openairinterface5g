@@ -3759,6 +3759,22 @@ void nr_mac_clean_cellgroup(NR_CellGroupConfig_t *cell_group)
     free(cell_group->rlc_BearerToReleaseList);
     cell_group->rlc_BearerToReleaseList = NULL;
   }
+  /* remove the released G-RNTIs of multicast sessions, the UE has them released */
+  NR_MAC_CellGroupConfig_t *mcg = cell_group->mac_CellGroupConfig;
+  if (mcg && mcg->ext4 && mcg->ext4->g_RNTI_ConfigToReleaseList_r17) {
+    struct NR_MAC_CellGroupConfig__ext4__g_RNTI_ConfigToReleaseList_r17 *l = mcg->ext4->g_RNTI_ConfigToReleaseList_r17;
+    asn_sequence_del(&l->list, l->list.count, /* free */ 1);
+    free(l);
+    mcg->ext4->g_RNTI_ConfigToReleaseList_r17 = NULL;
+    /* an extension group with nothing left in it is not sent at all */
+    const struct NR_MAC_CellGroupConfig__ext4 *e = mcg->ext4;
+    if (!e->intraCG_Prioritization_r17 && !e->drx_ConfigSL_r17 && !e->drx_ConfigExt_v1700 && !e->schedulingRequestID_BFR_r17
+        && !e->schedulingRequestID_BFR2_r17 && !e->schedulingRequestConfig_v1700 && !e->tar_Config_r17
+        && !e->g_RNTI_ConfigToAddModList_r17 && !e->g_CS_RNTI_ConfigToAddModList_r17 && !e->g_CS_RNTI_ConfigToReleaseList_r17) {
+      free(mcg->ext4);
+      mcg->ext4 = NULL;
+    }
+  }
   /* remove reestablishRLC, we don't need it anymore */
   for (int i = 0; i < cell_group->rlc_BearerToAddModList->list.count; ++i)
     free_and_zero(cell_group->rlc_BearerToAddModList->list.array[i]->reestablishRLC);

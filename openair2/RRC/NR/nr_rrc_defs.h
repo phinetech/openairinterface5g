@@ -96,6 +96,15 @@ typedef struct pdu_session_param_s {
   pdu_session_status_t status;
   uint8_t xid; // transaction_id
   ngap_cause_t cause;
+  /* The multicast MBS sessions this PDU session is associated with, i.e. the ones the UE has joined
+   * through it (TS 23.247 V18.8.0 clause 7.2.1.3 step 6: "the NG-RAN uses the MBS Session ID to
+   * determine that the PDU Session identified by the PDU Session ID is associated with the indicated
+   * multicast MBS session"). This is the CU-side membership the radio configuration will read to know
+   * which UE needs which multicast MRB. */
+  uint8_t nb_mbs_sessions;
+  mbs_session_id_t mbs_sessions[MAX_MBS_SESSIONS];
+  /* whether the UE has been sent the MRB of each of those sessions */
+  bool mbs_mrb_sent[MAX_MBS_SESSIONS];
 } rrc_pdu_session_param_t;
 
 typedef struct drb_s {
@@ -240,6 +249,9 @@ typedef struct gNB_RRC_UE_s {
 
   //SA block
   seq_arr_t pduSessions;
+  /* the multicast MRBs of the sessions the UE left, to release in the next RRCReconfiguration */
+  int nb_mbs_mrb_release;
+  long mbs_mrb_release[MAX_MBS_SESSIONS];
   // Established DRBs
   seq_arr_t drbs;
 
@@ -437,6 +449,9 @@ typedef struct nr_mac_rrc_dl_if_s {
   f1_reset_acknowledge_du_initiated_func_t f1_reset_acknowledge;
   f1_setup_response_func_t f1_setup_response;
   broadcast_context_setup_func_t broadcast_context_setup;
+  broadcast_context_release_func_t broadcast_context_release;
+  multicast_ue_join_func_t multicast_ue_join;
+  multicast_ue_leave_func_t multicast_ue_leave;
   f1_setup_failure_func_t f1_setup_failure;
   gnb_du_configuration_update_ack_func_t gnb_du_configuration_update_acknowledge;
   ue_context_setup_request_func_t ue_context_setup_request;
@@ -456,6 +471,7 @@ typedef struct cucp_cuup_if_s {
   cucp_cuup_bearer_context_setup_func_t bearer_context_setup;
   /* MBS broadcast: the session belongs to the cell, not to a UE */
   void (*bc_bearer_context_setup)(const struct e1ap_bc_bearer_setup_req_s *req);
+  void (*bc_bearer_context_release)(uint32_t gNB_cu_cp_mbs_e1ap_id);
   cucp_cuup_bearer_context_mod_func_t bearer_context_mod;
   cucp_cuup_bearer_context_mod_confirm_func_t bearer_context_mod_confirm;
   cucp_cuup_bearer_context_release_func_t bearer_context_release;

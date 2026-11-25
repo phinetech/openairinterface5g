@@ -237,6 +237,11 @@ typedef struct NR_UE_RRC_INST_s {
   int mbs_broadcast_num;
   uint16_t mbs_broadcast_g_rnti[16];
   uint64_t mbs_broadcast_lcids;
+  /* the UE's interface for MBS broadcast sessions, -1 until the first one is received */
+  int mbs_broadcast_sock;
+  /* LCIDs of the PTM RLC entities of multicast MRBs, which can be 32 (TS 38.331 LogicalChannelIdentity), beyond
+   * active_RLC_entity */
+  uint64_t mbs_multicast_lcids;
 
   /* KgNB as computed from parameters within USIM card */
   uint8_t kgnb[32];

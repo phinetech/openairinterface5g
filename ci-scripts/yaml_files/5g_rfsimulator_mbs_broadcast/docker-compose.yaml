@@ -33,7 +33,7 @@ services:
   # broadcast session. See doc/MBS_Broadcast_Tutorial.md for how to build it.
   mbs-cn:
     container_name: mbs-cn
-    image: ${CN_IMG:-open5gs_core:latest}
+    image: ${CN_IMG:-open5gs_core:mbs}
     privileged: true
     # Wait for MongoDB: the PCF gives up if the database is not there yet, and
     # a missing PCF rejects every UE with a cause that says nothing useful.
@@ -52,6 +52,16 @@ services:
     networks:
       mbs_net:
         ipv4_address: 192.168.77.10
+
+  # The application server: sends the session's data to its multicast group.
+  # The core image only because it has sendip; any host on mbs_net would do.
+  mbs-as:
+    container_name: mbs-as
+    image: ${CN_IMG:-open5gs_core:mbs}
+    entrypoint: ["sleep", "infinity"]
+    networks:
+      mbs_net:
+        ipv4_address: 192.168.77.20
 
   mbs-gnb:
     container_name: mbs-gnb

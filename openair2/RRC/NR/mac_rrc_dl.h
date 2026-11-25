@@ -27,6 +27,9 @@ typedef void (*f1_paging_transfer_func_t)(sctp_assoc_t assoc_id, const f1ap_pagi
 
 /* A broadcast session has no UE, so this is not a UE context procedure. */
 typedef void (*broadcast_context_setup_func_t)(sctp_assoc_t assoc_id, const f1ap_broadcast_ctx_setup_t *req);
+typedef void (*broadcast_context_release_func_t)(sctp_assoc_t assoc_id, const f1ap_broadcast_ctx_release_t *req);
+typedef void (*multicast_ue_join_func_t)(sctp_assoc_t assoc_id, const f1ap_multicast_ue_join_t *req);
+typedef void (*multicast_ue_leave_func_t)(sctp_assoc_t assoc_id, const f1ap_multicast_ue_leave_t *req);
 
 typedef void (*trp_information_request_func_t)(sctp_assoc_t assoc_id, const f1ap_trp_information_req_t *req);
 typedef void (*positioning_information_request_func_t)(sctp_assoc_t assoc_id, const f1ap_positioning_information_req_t *req);

@@ -97,6 +97,11 @@ sgwc:
         - address: 127.0.0.6
 
 smf:
+  # The PLMN of the TMGIs the MB-SMF allocates
+  serving:
+    - plmn_id:
+        mcc: 999
+        mnc: 70
   sbi:
     server:
       - address: 127.0.0.4
@@ -218,6 +223,16 @@ upf:
     server:
       - address: 127.0.0.7
         port: 9090
+  # MB-UPF: where it receives the MBS data of a session (ephemeral port)
+  mbs:
+    udptunnel:
+      address: 127.0.0.7
+      port: 0
+    # routes the session's multicast group from the network into ogstun itself
+    multicast_router:
+      input_interface: eth0
+      output_interface: ogstun
+      activate: true
 
 hss:
   freeDiameter:
@@ -257,6 +272,12 @@ pcrf:
         address: 127.0.0.4
 
 nrf:
+  # the PLMNs whose NFs may register: the 5G-MAG core based on Open5GS 2.8
+  # refuses the others
+  serving:
+    - plmn_id:
+        mcc: 999
+        mnc: 70
   sbi:
     server:
       - address: 127.0.0.10

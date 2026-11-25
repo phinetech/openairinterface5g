@@ -1704,4 +1704,24 @@ typedef struct f1ap_broadcast_ctx_setup_s {
   uint64_t nr_cellid;
 } f1ap_broadcast_ctx_setup_t;
 
+/* A UE joins a multicast session, at the DU. TS 38.473 splits this into the
+ * Multicast Context Setup of the session and the Multicast MBS Session list of
+ * a UE Context Modification; one internal message carries both until F1AP
+ * encodes them. The DU creates the session's group on its first member. */
+typedef struct f1ap_multicast_ue_join_s {
+  uint32_t gNB_CU_ue_id;
+  uint32_t gNB_DU_ue_id;
+  uint8_t tmgi[6];
+  long mrb_id;
+} f1ap_multicast_ue_join_t;
+
+/* A UE leaves a multicast session, at the DU: the counterpart of f1ap_multicast_ue_join_t. */
+typedef f1ap_multicast_ue_join_t f1ap_multicast_ue_leave_t;
+
+/* Broadcast Context Release (TS 38.473 §8.14.2): the session to take off the air. */
+typedef struct f1ap_broadcast_ctx_release_s {
+  uint32_t gNB_cu_mbs_f1ap_id;
+  uint8_t tmgi[6];
+} f1ap_broadcast_ctx_release_t;
+
 #endif /* F1AP_MESSAGES_TYPES_H_ */

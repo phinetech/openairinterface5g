@@ -21,6 +21,7 @@
 #include "nr_radio_config.h"
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
+#include "common/utils/oai_asn1.h"
 #include "openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h"
 
 /* DCI format 4_1 has a 4-bit HARQ process number (TS 38.212 §7.3.1.5.2) */
@@ -261,6 +262,133 @@ bool nr_mac_add_mbs_member(gNB_MAC_INST *mac, nr_mbs_group_t *group, NR_UE_info_
   }
   LOG_I(NR_MAC, "UE %04x joined MBS group G-RNTI %04x (%d members)\n", UE->rnti, group->g_rnti, group->num_members);
   return true;
+}
+
+/** @brief A UE asks to join a group: added now, or as soon as a reconfiguration of the UE that is ongoing is over
+ * (nr_mac_add_mbs_member() starts a reconfiguration of its own). Must be called with the scheduler lock held.
+ * @return false if the UE cannot join the group at all */
+/* a join or leave of the UE that waits for its ongoing reconfiguration, -1 if none */
+static int find_pending(const nr_mbs_group_t *group, rnti_t rnti)
+{
+  for (int i = 0; i < group->num_pending; i++)
+    if (group->pending[i] == rnti)
+      return i;
+  return -1;
+}
+
+static void drop_pending(nr_mbs_group_t *group, int i)
+{
+  group->num_pending--;
+  group->pending[i] = group->pending[group->num_pending];
+  group->pending_leave[i] = group->pending_leave[group->num_pending];
+}
+
+bool nr_mac_join_mbs_member(gNB_MAC_INST *mac, nr_mbs_group_t *group, NR_UE_info_t *UE)
+{
+  const int p = find_pending(group, UE->rnti);
+  if (p >= 0 && group->pending_leave[p]) {
+    /* it was to leave once its reconfiguration is over, and stays */
+    drop_pending(group, p);
+    return true;
+  }
+  if (UE->reconfigCellGroup || UE->cm_info.trigger_info != NO_TRIGGER) {
+    if (p >= 0)
+      return true;
+    DevAssert(group->num_pending < MAX_MOBILES_PER_GNB);
+    group->pending_leave[group->num_pending] = false;
+    group->pending[group->num_pending++] = UE->rnti;
+    LOG_I(NR_MAC, "UE %04x joins MBS group G-RNTI %04x once its ongoing reconfiguration is over\n", UE->rnti, group->g_rnti);
+    return true;
+  }
+  return nr_mac_add_mbs_member(mac, group, UE);
+}
+
+/* The CellGroupConfig of a UE without a group: its G-RNTI and PTM RLC entity are taken out of the add lists and put
+ * in the release lists (TS 38.331 MAC-CellGroupConfig g-RNTI-ConfigToReleaseList, CellGroupConfig
+ * rlc-BearerToReleaseList). The CFR stays: it is common to all the UE's multicast sessions. */
+static NR_CellGroupConfig_t *cellgroup_without_group(const NR_CellGroupConfig_t *cg, const nr_mbs_group_t *group)
+{
+  NR_CellGroupConfig_t *out = NULL;
+  asn_copy(&asn_DEF_NR_CellGroupConfig, (void **)&out, cg);
+  NR_MAC_CellGroupConfig_t *mcg = out->mac_CellGroupConfig;
+  if (mcg && mcg->ext4 && mcg->ext4->g_RNTI_ConfigToAddModList_r17) {
+    struct NR_MAC_CellGroupConfig__ext4__g_RNTI_ConfigToAddModList_r17 *l = mcg->ext4->g_RNTI_ConfigToAddModList_r17;
+    for (int i = 0; i < l->list.count; i++) {
+      if (l->list.array[i]->mbs_RNTI_SpecificConfigId_r17 == group->config.config_id) {
+        asn_sequence_del(&l->list, i, 1);
+        break;
+      }
+    }
+    /* SIZE (1..maxG-RNTI-r17): a list without entries has to go */
+    if (l->list.count == 0) {
+      free(l);
+      mcg->ext4->g_RNTI_ConfigToAddModList_r17 = NULL;
+    }
+    if (!mcg->ext4->g_RNTI_ConfigToReleaseList_r17)
+      mcg->ext4->g_RNTI_ConfigToReleaseList_r17 = calloc_or_fail(1, sizeof(*mcg->ext4->g_RNTI_ConfigToReleaseList_r17));
+    asn1cSequenceAdd(mcg->ext4->g_RNTI_ConfigToReleaseList_r17->list, NR_MBS_RNTI_SpecificConfigId_r17_t, id);
+    *id = group->config.config_id;
+  }
+  if (out->rlc_BearerToAddModList) {
+    struct NR_CellGroupConfig__rlc_BearerToAddModList *l = out->rlc_BearerToAddModList;
+    for (int i = 0; i < l->list.count; i++) {
+      const NR_RLC_BearerConfig_t *b = l->list.array[i];
+      if (b->logicalChannelIdentity == group->config.lcid && b->ext2 && b->ext2->multicastRLC_BearerConfig_r17) {
+        asn_sequence_del(&l->list, i, 1);
+        break;
+      }
+    }
+  }
+  if (!out->rlc_BearerToReleaseList)
+    out->rlc_BearerToReleaseList = calloc_or_fail(1, sizeof(*out->rlc_BearerToReleaseList));
+  asn1cSequenceAdd(out->rlc_BearerToReleaseList->list, NR_LogicalChannelIdentity_t, lcid);
+  *lcid = group->config.lcid;
+  return out;
+}
+
+/** @brief A UE leaves a group: no more PTM transmissions towards it, and its G-RNTI and PTM RLC entity are released
+ * in an RRCReconfiguration; as soon as a reconfiguration of the UE that is ongoing is over, if there is one. Must be
+ * called with the scheduler lock held. */
+void nr_mac_leave_mbs_member(gNB_MAC_INST *mac, nr_mbs_group_t *group, NR_UE_info_t *UE)
+{
+  const int p = find_pending(group, UE->rnti);
+  if (!is_mbs_member(group, UE->rnti)) {
+    /* a join that was still waiting does not happen */
+    if (p >= 0 && !group->pending_leave[p])
+      drop_pending(group, p);
+    return;
+  }
+  if (UE->reconfigCellGroup || UE->cm_info.trigger_info != NO_TRIGGER) {
+    if (p < 0) {
+      DevAssert(group->num_pending < MAX_MOBILES_PER_GNB);
+      group->pending_leave[group->num_pending] = true;
+      group->pending[group->num_pending++] = UE->rnti;
+      LOG_I(NR_MAC, "UE %04x leaves MBS group G-RNTI %04x once its ongoing reconfiguration is over\n", UE->rnti, group->g_rnti);
+    }
+    return;
+  }
+  nr_mac_remove_mbs_member(mac, group, UE);
+  UE->cm_info.trigger_info = MBS_LEAVE;
+  nr_mac_request_reconfiguration(mac, UE, cellgroup_without_group(UE->CellGroup, group));
+}
+
+/* the joins and leaves that had to wait for a reconfiguration of the UE */
+static void add_pending_members(gNB_MAC_INST *mac, nr_mbs_group_t *group)
+{
+  int i = 0;
+  while (i < group->num_pending) {
+    NR_UE_info_t *UE = find_connected_nr_ue(&mac->UE_info, group->pending[i]);
+    if (UE && (UE->reconfigCellGroup || UE->cm_info.trigger_info != NO_TRIGGER)) {
+      i++;
+      continue;
+    }
+    const bool leave = group->pending_leave[i];
+    drop_pending(group, i);
+    if (UE && leave)
+      nr_mac_leave_mbs_member(mac, group, UE);
+    else if (UE)
+      nr_mac_add_mbs_member(mac, group, UE);
+  }
 }
 
 /** @brief Stops PTM transmissions of a group towards a UE, and gives the reserved HARQ processes back to unicast.
@@ -701,6 +829,14 @@ static void nr_schedule_mbs_group(gNB_MAC_INST *mac, nr_cell_sched_t *cell, post
                           pdu_index,
                           n_members > 0 ? members[0] : NULL);
   fill_dl_tx_request(pp_pdsch, buf, pdu_index, sched_pdsch.tb_size, frame, slot);
+  T(T_GNB_MAC_DL_PDU_WITH_DATA,
+    T_INT(mac->Mod_id),
+    T_INT(0),
+    T_INT(group->g_rnti),
+    T_INT(frame),
+    T_INT(slot),
+    T_INT(pid),
+    T_BUFFER(buf, sched_pdsch.tb_size));
   group->ptm_tx++;
   group->ptm_sdu_bytes += sdu_bytes;
   for (int m = 0; m < n_members; m++) {
@@ -772,7 +908,10 @@ void nr_schedule_mbs(gNB_MAC_INST *mac, nr_cell_sched_t *cell, post_process_pdsc
   if (!is_dl_slot(pp_pdsch->slot, &cell->frame_structure))
     return;
   for (nr_mbs_group_t **g = mac->UE_info.mbs_group_list; *g; g++) {
-    if ((*g)->cell == cell)
-      nr_schedule_mbs_group(mac, cell, pp_pdsch, *g);
+    if ((*g)->cell != cell)
+      continue;
+    if ((*g)->num_pending > 0)
+      add_pending_members(mac, *g);
+    nr_schedule_mbs_group(mac, cell, pp_pdsch, *g);
   }
 }

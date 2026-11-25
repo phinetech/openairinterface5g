@@ -16,4 +16,6 @@ void ngap_handle_ng_setup_message(ngap_gNB_amf_data_t *amf_desc_p, int sctp_shut
 
 int ngap_gNB_handle_message(sctp_assoc_t assoc_id, int32_t stream, const uint8_t *const data, const uint32_t data_length);
 
+bool ngap_gNB_mbs_broadcast_release_local(void);
+
 #endif /* NGAP_GNB_HANDLERS_H_ */

@@ -13,6 +13,7 @@
 #include "openair2/RRC/NR/rrc_gNB_UE_context.h"
 #include "openair2/RRC/NR/rrc_gNB_NGAP.h"
 #include "openair3/NGAP/ngap_gNB_ue_context.h"
+#include "openair3/NGAP/ngap_gNB_handlers.h"
 
 #define TELNETSERVERCODE
 #include "telnetsrv.h"
@@ -148,10 +149,25 @@ static int rrc_gNB_trigger_ue_context_release_req(char *buf, int debug, telnet_p
   return 0;
 }
 
+/** @brief Release the MBS broadcast session in this gNB without the 5GC asking for it
+ * (a core that cannot send BroadcastSessionReleaseRequest leaves no other way) */
+static int rrc_gNB_trigger_mbs_broadcast_release(char *buf, int debug, telnet_printfunc_t prnt)
+{
+  (void)buf;
+  (void)debug;
+  if (!RC.nrrrc)
+    ERROR_MSG_RET("no RRC present, cannot release the MBS broadcast session\n");
+  if (!ngap_gNB_mbs_broadcast_release_local())
+    ERROR_MSG_RET("no MBS broadcast session to release\n");
+  prnt("MBS broadcast session released in this gNB\n");
+  return 0;
+}
+
 static telnetshell_cmddef_t rrc_cmds[] = {
   {"release_rrc", "[rrc_ue_id(int,opt)]", rrc_gNB_trigger_release},
   {"release_rrc_all", "", rrc_gNB_trigger_release_all},
   {"ctx_rel_req", "[rrc_ue_id(int,opt)]", rrc_gNB_trigger_ue_context_release_req},
+  {"release_mbs_broadcast", "", rrc_gNB_trigger_mbs_broadcast_release},
   {"", "", NULL},
 };
 

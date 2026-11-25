@@ -28,6 +28,7 @@
 #include "PduSessionEstablishmentAccept.h"
 #include "PduSessionModificationCommand.h"
 #include "PduSessionModificationComplete.h"
+#include "PduSessionModificationRequest.h"
 #include "RegistrationAccept.h"
 #include "SORTransparentContainer.h"
 #include "FGSIdentityResponse.h"
@@ -1869,6 +1870,7 @@ static void handle_pdu_session_accept(nr_ue_nas_t *nas, uint8_t *pdu_buffer, uin
   }
   /* Track active PDU session for later PDU session status IE (24.501 8.2.16.3) */
   nas->psi_status[sm_header.pdu_session_id] = PDU_SESSION_ACTIVE;
+
   // ask RRC to start connected reader for this PSI
   if (t->sock > 0)
     send_nas_tun_req(nas, sm_header.pdu_session_id);
@@ -1966,6 +1968,132 @@ static void generatePduSessionModificationComplete(nr_ue_nas_t *nas,
   for (int i = 0; i < 4; i++) {
     responseMsg->nas_data[2 + i] = mac[i];
   }
+}
+
+/**
+ * @brief Ask to join a multicast MBS session: a PDU Session Modification Request carrying a
+ *        Requested MBS container, sent on an existing PDU session.
+ *
+ * TS 23.247 V18.8.0 clause 7.2.1.3 step 1: "if there is an existing PDU session that can be used to
+ * send the UE join request for the multicast MBS Session, the UE sends a PDU Session Modification
+ * Request over that PDU session (i.e. associated PDU Session) which additionally contains one or
+ * several MBS Session ID(s) and join request."
+ *
+ * The wrapping into a security-protected UL NAS TRANSPORT is the same as
+ * generatePduSessionModificationComplete() above; only the 5GSM payload differs.
+ */
+static void generateMbsRequest(nr_ue_nas_t *nas,
+                               as_nas_info_t *responseMsg,
+                               uint8_t pdu_session_id,
+                               const uint8_t *tmgi,
+                               mbs_operation_t operation)
+{
+  int size = 0;
+
+  pdu_session_modification_request_msg req = {0};
+  req.protocoldiscriminator = FGS_SESSION_MANAGEMENT_MESSAGE;
+  req.pdusessionid = pdu_session_id;
+  /* A UE-requested procedure needs its own PTI (TS 24.501 clause 6.3.2.1); 1 is enough while only
+   * one such procedure is ever outstanding in this UE. */
+  req.pti = 1;
+  req.pdusessionmodificationrequestmsgtype = FGS_PDU_SESSION_MODIFICATION_REQ;
+  req.requested_mbs_present = true;
+  req.num_requested_mbs = 1;
+  req.requested_mbs[0].operation = operation;
+  memcpy(req.requested_mbs[0].tmgi, tmgi, MBS_TMGI_LEN);
+
+  uint8_t req_buffer[4 + 3 + MBS_MAX_SESSIONS * (1 + MBS_TMGI_LEN)];
+  int req_length = encode_pdu_session_modification_request(&req, req_buffer, sizeof(req_buffer));
+  if (req_length < 0) {
+    LOG_E(NAS, "Could not encode the PDU Session Modification Request of the MBS join or leave\n");
+    return;
+  }
+
+  nas_stream_cipher_t stream_cipher = {0};
+  uint8_t mac[NAS_INTEGRITY_SIZE];
+
+  // 5GMM security protected message
+  fgmm_nas_msg_security_protected_t sp_msg = {0};
+  fgs_nas_message_security_header_t *sp_header = &sp_msg.header;
+  sp_header->protocol_discriminator = FGS_MOBILITY_MANAGEMENT_MESSAGE;
+  sp_header->security_header_type = INTEGRITY_PROTECTED_AND_CIPHERED;
+  sp_header->sequence_number = nas->security.nas_count_ul & 0xff;
+
+  size += 7;
+
+  fgmm_nas_message_plain_t *plain = &sp_msg.plain;
+
+  plain->header = set_mm_header(FGS_UPLINK_NAS_TRANSPORT, PLAIN_5GS_MSG);
+  size += sizeof(plain->header);
+
+  fgs_uplink_nas_transport_msg *mm_msg = &plain->mm_msg.uplink_nas_transport;
+  mm_msg->payloadcontainertype.type = 1;
+  size += 1;
+  mm_msg->fgspayloadcontainer.payloadcontainercontents.length = req_length;
+  mm_msg->fgspayloadcontainer.payloadcontainercontents.value = req_buffer;
+  size += (2 + req_length);
+  mm_msg->pdusessionid = pdu_session_id;
+  size += 2;
+
+  responseMsg->nas_data = malloc_or_fail(size * sizeof(*responseMsg->nas_data));
+  int security_header_len = nas_protected_security_header_encode(responseMsg->nas_data, sp_header, size);
+
+  responseMsg->length =
+      security_header_len
+      + mm_msg_encode(plain, (uint8_t *)(responseMsg->nas_data + security_header_len), size - security_header_len);
+
+  /* ciphering */
+  uint8_t buf[responseMsg->length - 7];
+  stream_cipher.context = nas->security_container->ciphering_context;
+  AssertFatal(nas->security.nas_count_ul <= 0xffffff, "fatal: NAS COUNT UL too big (todo: fix that)\n");
+  stream_cipher.count = nas->security.nas_count_ul;
+  stream_cipher.bearer = 1;
+  stream_cipher.message = (unsigned char *)(responseMsg->nas_data + 7);
+  stream_cipher.blength = (responseMsg->length - 7) << 3;
+  stream_compute_encrypt(nas->security_container->ciphering_algorithm, &stream_cipher, buf);
+  memcpy(stream_cipher.message, buf, responseMsg->length - 7);
+
+  /* integrity protection */
+  stream_cipher.context = nas->security_container->integrity_context;
+  stream_cipher.count = nas->security.nas_count_ul++;
+  stream_cipher.bearer = 1;
+  stream_cipher.message = (unsigned char *)(responseMsg->nas_data + 6);
+  stream_cipher.blength = (responseMsg->length - 6) << 3;
+  stream_compute_integrity(nas->security_container->integrity_algorithm, &stream_cipher, mac);
+
+  for (int i = 0; i < 4; i++)
+    responseMsg->nas_data[2 + i] = mac[i];
+}
+
+/**
+ * @brief Ask to join or leave a multicast MBS session, over an active PDU session.
+ *
+ * Triggered at runtime (telnet `ciUE mbs_join` / `mbs_leave`), so a test decides which UE joins and
+ * when. Clause 7.2.1.3 step 1 needs "an existing PDU session that can be used to send the UE join
+ * request": the first active one is used.
+ */
+int nas_mbs_request(int ue_id, const char *tmgi_hex, bool join)
+{
+  nr_ue_nas_t *nas = get_ue_nas_info(ue_id);
+  uint8_t tmgi[MBS_TMGI_LEN];
+  if (!mbs_tmgi_from_string(tmgi_hex, tmgi))
+    return -1;
+  if (nas->security_container == NULL)
+    return -2;
+  int psi = 0;
+  for (int i = 1; i < MAX_NUM_PSI && psi == 0; i++)
+    if (nas->psi_status[i] == PDU_SESSION_ACTIVE)
+      psi = i;
+  if (psi == 0)
+    return -3;
+
+  as_nas_info_t msg = {0};
+  generateMbsRequest(nas, &msg, psi, tmgi, join ? MBS_OP_JOIN : MBS_OP_LEAVE);
+  if (msg.length == 0)
+    return -4;
+  send_nas_uplink_data_req(nas, &msg);
+  LOG_A(NAS, "MBS: asked to %s multicast session TMGI %s on PDU session %d\n", join ? "join" : "leave", tmgi_hex, psi);
+  return 0;
 }
 
 /**
@@ -2135,6 +2263,34 @@ static void handle_pdu_session_modification_command(nr_ue_nas_t *nas, uint8_t *p
 
   if (msg.cause_present) {
     LOG_I(NAS, "PDU session %d: 5GSM cause: 0x%02x\n", sm_header.pdu_session_id, msg.cause);
+  }
+
+  /* What the network decided about the MBS sessions this UE asked to join (TS 24.501 clause 6.3.2.3:
+   * "If the PDU SESSION MODIFICATION COMMAND message includes the Received MBS container IE, for each
+   * of the Received MBS informations"). Acting on it -- a multicast MRB, a G-RNTI -- is the radio
+   * work; what the UE does today is say what it was told. */
+  if (msg.received_mbs_present) {
+    for (int i = 0; i < msg.received_mbs.num; i++) {
+      const received_mbs_info_t *info = &msg.received_mbs.info[i];
+      char tmgi[2 * MBS_TMGI_LEN + 1] = {0};
+
+      for (int j = 0; j < MBS_TMGI_LEN; j++)
+        snprintf(tmgi + 2 * j, 3, "%02x", info->tmgi[j]);
+
+      if (info->decision == MBS_DECISION_JOIN_REJECTED || info->decision == MBS_DECISION_REMOVE_UE)
+        LOG_A(NAS,
+              "MBS: PDU session %d, multicast session TMGI %s: %s (%s)\n",
+              sm_header.pdu_session_id,
+              tmgi,
+              mbs_decision_text(info->decision),
+              mbs_reject_cause_text(info->reject_cause));
+      else
+        LOG_A(NAS,
+              "MBS: PDU session %d, multicast session TMGI %s: %s\n",
+              sm_header.pdu_session_id,
+              tmgi,
+              mbs_decision_text(info->decision));
+    }
   }
 
   // Send PDU Session Modification Complete response
@@ -2979,3 +3135,4 @@ void nas_init_nrue(int num_ues) {
     (void)get_ue_nas_info(i);
   }
 }
+

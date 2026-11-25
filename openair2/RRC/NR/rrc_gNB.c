@@ -835,6 +835,7 @@ void free_RRCReconfiguration_params(nr_rrc_reconfig_param_t params)
 {
   ASN_STRUCT_FREE(asn_DEF_NR_DRB_ToAddModList, params.drb_config_list);
   ASN_STRUCT_FREE(asn_DEF_NR_SRB_ToAddModList, params.srb_config_list);
+  ASN_STRUCT_FREE(asn_DEF_NR_MRB_ToAddModList_r17, params.mrb_config_list);
   ASN_STRUCT_FREE(asn_DEF_NR_SecurityConfig, params.security_config);
   free(params.drb_rel);
   for (int i = 0; i < params.num_nas_msg; i++)
@@ -1350,13 +1351,48 @@ static void rrc_gNB_process_RRCReestablishmentComplete(gNB_RRC_INST *rrc, gNB_RR
 
 /* \brief Explicit request for reconfiguration from DU, after UE context
  * modificatien required. Send in a UE context modification confirm message. */
+/* The multicast MRBs of the sessions the UE joined and was not configured for yet (TS 38.331 MRB-ToAddMod): they go
+ * with the reconfiguration that the DU starts when the UE joins, which brings the G-RNTI and the PTM RLC entity. */
+static NR_MRB_ToAddModList_r17_t *get_new_mrbs(gNB_RRC_UE_t *ue)
+{
+  NR_MRB_ToAddModList_r17_t *list = NULL;
+  FOR_EACH_SEQ_ARR(rrc_pdu_session_param_t *, session, &ue->pduSessions) {
+    for (int i = 0; i < session->nb_mbs_sessions; i++) {
+      if (session->mbs_mrb_sent[i])
+        continue;
+      session->mbs_mrb_sent[i] = true;
+      if (!list)
+        list = calloc_or_fail(1, sizeof(*list));
+      asn1cSequenceAdd(list->list, NR_MRB_ToAddMod_r17_t, mrb);
+      mrb->mrb_Identity_r17 = mbs_multicast_mrb_id(session->mbs_sessions[i].tmgi);
+      /* the PLMN of the TMGI is the first one of SIB1 */
+      asn1cCalloc(mrb->mbs_SessionId_r17, tmgi);
+      tmgi->plmn_Id_r17.present = NR_TMGI_r17__plmn_Id_r17_PR_plmn_Index;
+      tmgi->plmn_Id_r17.choice.plmn_Index = 1;
+      OCTET_STRING_fromBuf(&tmgi->serviceId_r17, (const char *)session->mbs_sessions[i].tmgi, 3);
+      /* DL only, no header compression; the values the DU's PDCP entity of the session uses (nr_pdcp_mbs_test.h) */
+      asn1cCalloc(mrb->pdcp_Config_r17, pdcp);
+      asn1cCalloc(pdcp->drb, drb);
+      asn1cCallocOne(drb->pdcp_SN_SizeDL, NR_PDCP_Config__drb__pdcp_SN_SizeDL_len12bits);
+      drb->headerCompression.present = NR_PDCP_Config__drb__headerCompression_PR_notUsed;
+      asn1cCallocOne(pdcp->t_Reordering, NR_PDCP_Config__t_Reordering_ms100);
+      LOG_I(NR_RRC, "UE %d: multicast MRB %ld for PDU session %d\n", ue->rrc_ue_id, mrb->mrb_Identity_r17, session->param.pdusession_id);
+    }
+  }
+  return list;
+}
+
 static int nr_rrc_reconfiguration_req(gNB_RRC_INST *rrc, gNB_RRC_UE_t *ue_p)
 {
   uint8_t xid = rrc_gNB_get_next_transaction_identifier(rrc->module_id);
   ue_p->xids[xid] = RRC_DEDICATED_RECONF;
   ue_p->ongoing_reconfiguration = true;
 
-  nr_rrc_reconfig_param_t params = {.cgc = &ue_p->mcg, .transaction_id = xid};
+  nr_rrc_reconfig_param_t params = {.cgc = &ue_p->mcg, .transaction_id = xid, .mrb_config_list = get_new_mrbs(ue_p)};
+  /* the MRBs of the multicast sessions the UE left (TS 38.331 mrb-ToReleaseList) */
+  for (int i = 0; i < ue_p->nb_mbs_mrb_release && params.n_mrb_rel < (int)sizeofArray(params.mrb_rel); i++)
+    params.mrb_rel[params.n_mrb_rel++] = ue_p->mbs_mrb_release[i];
+  ue_p->nb_mbs_mrb_release = 0;
   byte_array_t msg = do_RRCReconfiguration(&params);
   if (msg.len <= 0) {
     LOG_E(NR_RRC, "UE %d: Failed to generate RRCReconfiguration\n", ue_p->rrc_ue_id);

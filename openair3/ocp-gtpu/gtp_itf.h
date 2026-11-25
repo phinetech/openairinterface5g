@@ -159,6 +159,7 @@ in_addr_t gtpv1uGetLocalAddr(instance_t instance);
 /* Accept a TEID chosen by the core rather than allocating one. See the
  * definition for why a broadcast session needs this. */
 bool gtpv1uRegisterIncomingTeid(teid_t incoming_teid, ue_id_t ue_id, int rb_id, gtpCallbackSDAP callBack);
+void gtpv1uUnregisterIncomingTeid(teid_t incoming_teid);
   int gtpv1Term(instance_t inst);
   void *gtpv1uTask(void *args);
 

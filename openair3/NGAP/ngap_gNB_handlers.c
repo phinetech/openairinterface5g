@@ -1186,6 +1186,8 @@ static bool decodePDUSessionResourceModify(pdusession_mod_req_transfer_t *out, c
   // Reset counters
   out->nb_qos_to_add_modify = 0;
   out->nb_qos_to_release = 0;
+  out->nb_mbs_to_setup_modify = 0;
+  out->nb_mbs_to_release = 0;
 
   NGAP_PDUSessionResourceModifyRequestTransfer_t *pdusessionTransfer = (NGAP_PDUSessionResourceModifyRequestTransfer_t *)decoded;
   for (int j = 0; j < pdusessionTransfer->protocolIEs.list.count; j++) {
@@ -1240,6 +1242,66 @@ static bool decodePDUSessionResourceModify(pdusession_mod_req_transfer_t *out, c
           }
           out->qos_to_release[i].qfi = item->qosFlowIdentifier;
           out->qos_to_release[i].cause = decode_ngap_cause(&item->cause);
+        }
+        break;
+      }
+      /* MBS Session Setup or Modify Request List (ProtocolIE-ID 319, TS 38.413 V17.10.0): the
+       * multicast MBS sessions this UE's PDU session is being associated with. Each item is an MBS
+       * Session ID; the optional associated QoS flow list is for 5GC Individual MBS traffic delivery
+       * (the fall-back when the RAN does not support MBS), and clause 7.2.1.3 step 6 of
+       * TS 23.247 V18.8.0 says that with shared delivery it "is not used to allocate the radio
+       * resource and CN resource", so it is not read here. */
+      case NGAP_ProtocolIE_ID_id_MBSSessionSetuporModifyRequestList: {
+        NGAP_MBSSessionSetuporModifyRequestList_t *list =
+            &pdusessionTransfer_ies->value.choice.MBSSessionSetuporModifyRequestList;
+        if (list->list.count > MAX_MBS_SESSIONS) {
+          LOG_E(NGAP, "MBSSessionSetuporModifyRequestList count %d exceeds MAX_MBS_SESSIONS %d\n",
+                list->list.count, MAX_MBS_SESSIONS);
+          ASN_STRUCT_FREE(asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, pdusessionTransfer);
+          return false;
+        }
+        out->nb_mbs_to_setup_modify = 0;
+        for (int i = 0; i < list->list.count; i++) {
+          NGAP_MBSSessionSetuporModifyRequestItem_t *item = list->list.array[i];
+          if (!item) {
+            LOG_E(NGAP, "NULL MBSSessionSetuporModifyRequestItem at index %d\n", i);
+            ASN_STRUCT_FREE(asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, pdusessionTransfer);
+            return false;
+          }
+          /* TMGI ::= OCTET STRING (SIZE(6)). A shorter one is not a TMGI, and silently zero-padding
+           * it would make the gNB answer about a session nobody asked for. */
+          if (item->mBS_SessionID.tMGI.size != sizeof(out->mbs_to_setup_modify[0].tmgi)) {
+            LOG_E(NGAP, "MBS Session ID with a %d-octet TMGI, expected %zu\n",
+                  (int)item->mBS_SessionID.tMGI.size, sizeof(out->mbs_to_setup_modify[0].tmgi));
+            ASN_STRUCT_FREE(asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, pdusessionTransfer);
+            return false;
+          }
+          memcpy(out->mbs_to_setup_modify[out->nb_mbs_to_setup_modify].tmgi,
+                 item->mBS_SessionID.tMGI.buf,
+                 sizeof(out->mbs_to_setup_modify[0].tmgi));
+          out->nb_mbs_to_setup_modify++;
+        }
+        break;
+      }
+      /* MBS Session To Release List (ProtocolIE-ID 317, TS 38.413 V17.10.0 clause 9.3.1.215): the
+       * multicast MBS sessions the UE leaves. The cause of each item says why; the gNB removes the UE
+       * either way. */
+      case NGAP_ProtocolIE_ID_id_MBSSessionToReleaseList: {
+        NGAP_MBSSessionToReleaseList_t *list = &pdusessionTransfer_ies->value.choice.MBSSessionToReleaseList;
+        if (list->list.count > MAX_MBS_SESSIONS) {
+          LOG_E(NGAP, "MBSSessionToReleaseList count %d exceeds MAX_MBS_SESSIONS %d\n", list->list.count, MAX_MBS_SESSIONS);
+          ASN_STRUCT_FREE(asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, pdusessionTransfer);
+          return false;
+        }
+        for (int i = 0; i < list->list.count; i++) {
+          NGAP_MBSSessionToReleaseItem_t *item = list->list.array[i];
+          if (!item || item->mBS_SessionID.tMGI.size != sizeof(out->mbs_to_release[0].tmgi)) {
+            LOG_E(NGAP, "Malformed MBSSessionToReleaseItem at index %d\n", i);
+            ASN_STRUCT_FREE(asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, pdusessionTransfer);
+            return false;
+          }
+          memcpy(out->mbs_to_release[out->nb_mbs_to_release].tmgi, item->mBS_SessionID.tMGI.buf, sizeof(out->mbs_to_release[0].tmgi));
+          out->nb_mbs_to_release++;
         }
         break;
       }
@@ -1329,18 +1391,22 @@ static int ngap_gNB_handle_pdusession_modify_request(sctp_assoc_t assoc_id, uint
 
     msg->pdusession[i].pdusession_id = item_p->pDUSessionID;
 
-    // check for the NAS PDU
-    if (item_p->nAS_PDU != NULL && item_p->nAS_PDU->size > 0) {
+    /* The NAS PDU is optional (TS 38.413 V17.10.0 clause 9.2.1.5, PDUSessionResourceModifyItemModReq:
+     * "NAS-PDU | O"), the transfer is not -- and an MBS join carries both, so the transfer has to be
+     * decoded whether or not a NAS PDU came with it. */
+    if (item_p->nAS_PDU != NULL && item_p->nAS_PDU->size > 0)
       msg->pdusession[i].nas_pdu = create_byte_array(item_p->nAS_PDU->size, item_p->nAS_PDU->buf);
-      if (!decodePDUSessionResourceModify(&msg->pdusession[i].pdusessionTransfer, item_p->pDUSessionResourceModifyRequestTransfer)) {
-        NGAP_ERROR("Failed to decode pDUSessionResourceModifyRequestTransfer for PDU session %lu\n", item_p->pDUSessionID);
-        itti_free(TASK_NGAP, message_p);
-        return -1;
-      }
-    } else {
-      LOG_W(NGAP, "received pdu session modify with void content for UE %u, pdu session %lu\n", msg->gNB_ue_ngap_id, item_p->pDUSessionID);
-      continue;
+
+    if (!decodePDUSessionResourceModify(&msg->pdusession[i].pdusessionTransfer, item_p->pDUSessionResourceModifyRequestTransfer)) {
+      NGAP_ERROR("Failed to decode pDUSessionResourceModifyRequestTransfer for PDU session %lu\n", item_p->pDUSessionID);
+      itti_free(TASK_NGAP, message_p);
+      return -1;
     }
+
+    if (msg->pdusession[i].nas_pdu.len == 0 && msg->pdusession[i].pdusessionTransfer.nb_qos_to_add_modify == 0
+        && msg->pdusession[i].pdusessionTransfer.nb_qos_to_release == 0
+        && msg->pdusession[i].pdusessionTransfer.nb_mbs_to_setup_modify == 0)
+      LOG_W(NGAP, "received pdu session modify with void content for UE %u, pdu session %lu\n", msg->gNB_ue_ngap_id, item_p->pDUSessionID);
   }
   itti_send_msg_to_task(TASK_RRC_GNB, ue_desc_p->gNB_instance->instance, message_p);
 
@@ -1549,6 +1615,21 @@ static int ngap_gNB_handle_dl_ran_status_transfer(sctp_assoc_t assoc_id, uint32_
  * which needs the MRB to be able to deliver, behind group scheduling.
  * Until then the DU still reads the session from its descriptor file, and
  * this handler proves the standard path works. */
+/* The broadcast sessions of this gNB. Session k uses k + 1 as its context id on E1 and F1 and as its MRB identity,
+ * so that every layer can tell the sessions apart. */
+static struct {
+  bool active;
+  uint8_t tmgi[6];
+} mbs_broadcast_sessions[MAX_MBS_SESSIONS];
+
+static int mbs_broadcast_session_find(const uint8_t *tmgi)
+{
+  for (int k = 0; k < MAX_MBS_SESSIONS; k++)
+    if (mbs_broadcast_sessions[k].active && memcmp(mbs_broadcast_sessions[k].tmgi, tmgi, 6) == 0)
+      return k;
+  return -1;
+}
+
 static int ngap_gNB_handle_broadcast_session_setup(sctp_assoc_t assoc_id, uint32_t stream, NGAP_NGAP_PDU_t *pdu)
 {
   NGAP_BroadcastSessionSetupRequest_t *container;
@@ -1640,15 +1721,30 @@ static int ngap_gNB_handle_broadcast_session_setup(sctp_assoc_t assoc_id, uint32
   ngap_gNB_itti_send_sctp_data_req(amf_desc_p->ngap_gNB_instance->instance, assoc_id, buffer, length, 0);
   NGAP_INFO("[SCTP %u] Broadcast session setup acknowledged\n", assoc_id);
 
+  /* A session the gNB has already set up is acknowledged again, and set up only once. */
+  if (tmgi->size != 6) {
+    NGAP_ERROR("[SCTP %u] Broadcast session with a TMGI of %d octets is not supported\n", assoc_id, (int)tmgi->size);
+    return -1;
+  }
+  if (mbs_broadcast_session_find(tmgi->buf) >= 0) {
+    NGAP_INFO("[SCTP %u] Broadcast session %s is already set up\n", assoc_id, tmgi_hex);
+    return 0;
+  }
+  int k = 0;
+  while (k < MAX_MBS_SESSIONS && mbs_broadcast_sessions[k].active)
+    k++;
+  if (k == MAX_MBS_SESSIONS) {
+    NGAP_ERROR("[SCTP %u] More than %d broadcast sessions, %s is not set up\n", assoc_id, MAX_MBS_SESSIONS, tmgi_hex);
+    return -1;
+  }
+
   /* Tell the user plane. In a CP/UP split the CU-UP terminates N3 and knows
-   * nothing of N2, so without this the session stops here. One session for
-   * now, so the context id is fixed; a session table replaces it when there
-   * can be more than one. */
+   * nothing of N2, so without this the session stops here. */
   {
     e1ap_bc_bearer_setup_req_t req = {0};
-    req.gNB_cu_cp_mbs_e1ap_id = 1;
+    req.gNB_cu_cp_mbs_e1ap_id = k + 1;
     memcpy(req.tmgi, tmgi->buf, sizeof(req.tmgi));
-    req.mrb_id = 1;
+    req.mrb_id = k + 1;
     req.sst = 1;
     req.tnl_present = mbs_tnl.tnl_present;
     req.multicast_addr = mbs_tnl.multicast_addr;
@@ -1674,9 +1770,9 @@ static int ngap_gNB_handle_broadcast_session_setup(sctp_assoc_t assoc_id, uint32
     const gNB_RRC_INST *rrc = RC.nrrrc[0];
     if (rrc != NULL && rrc->mac_rrc.broadcast_context_setup != NULL) {
       f1ap_broadcast_ctx_setup_t req = {0};
-      req.gNB_cu_mbs_f1ap_id = 1;
+      req.gNB_cu_mbs_f1ap_id = k + 1;
       memcpy(req.tmgi, tmgi->buf, sizeof(req.tmgi));
-      req.mrb_id = 1;
+      req.mrb_id = k + 1;
       req.sst = 1;
       /* The cell to broadcast on. One DU with one cell, so it is that one;
        * selecting a subset is what the MBS service area is for. */
@@ -1685,12 +1781,282 @@ static int ngap_gNB_handle_broadcast_session_setup(sctp_assoc_t assoc_id, uint32
       NGAP_INFO("[SCTP %u] Broadcast session handed to the DU (assoc_id %d)\n", assoc_id, du);
     }
   }
+  mbs_broadcast_sessions[k].active = true;
+  memcpy(mbs_broadcast_sessions[k].tmgi, tmgi->buf, sizeof(mbs_broadcast_sessions[k].tmgi));
+  return 0;
+}
+
+/* Take broadcast session k down in this gNB: the user plane first, so that
+ * nothing arrives for a session that is no longer on the air, then the DU. */
+static void mbs_broadcast_session_release(int k)
+{
+  const gNB_RRC_INST *rrc = RC.nrrrc[0];
+  if (rrc == NULL || !mbs_broadcast_sessions[k].active)
+    return;
+  if (rrc->cucp_cuup.bc_bearer_context_release != NULL)
+    rrc->cucp_cuup.bc_bearer_context_release(k + 1);
+  if (rrc->mac_rrc.broadcast_context_release != NULL) {
+    f1ap_broadcast_ctx_release_t req = {.gNB_cu_mbs_f1ap_id = k + 1};
+    memcpy(req.tmgi, mbs_broadcast_sessions[k].tmgi, sizeof(req.tmgi));
+    plmn_id_t plmn;
+    uint64_t nr_cellid;
+    const sctp_assoc_t du = get_any_du_cell(&plmn, &nr_cellid);
+    rrc->mac_rrc.broadcast_context_release(du, &req);
+  }
+  mbs_broadcast_sessions[k].active = false;
+}
+
+/* Release the broadcast sessions without the 5GC asking for it.
+ *
+ * A test aid: the 5G-MAG core accepts the deletion of a session but never
+ * sends BroadcastSessionReleaseRequest, so the procedure below cannot be
+ * reached from it. The core is not told either, and keeps distributing the
+ * sessions; this gNB has left their groups by then. */
+bool ngap_gNB_mbs_broadcast_release_local(void)
+{
+  bool any = false;
+  for (int k = 0; k < MAX_MBS_SESSIONS; k++) {
+    any |= mbs_broadcast_sessions[k].active;
+    mbs_broadcast_session_release(k);
+  }
+  return any;
+}
+
+/* BroadcastSessionReleaseRequest (TS 38.413 §8.17.2): the 5GC ends a broadcast
+ * session. Non UE-associated, like its setup. */
+static int ngap_gNB_handle_broadcast_session_release(sctp_assoc_t assoc_id, uint32_t stream, NGAP_NGAP_PDU_t *pdu)
+{
+  UNUSED(stream);
+  DevAssert(pdu != NULL);
+  NGAP_BroadcastSessionReleaseRequest_t *container = &pdu->choice.initiatingMessage->value.choice.BroadcastSessionReleaseRequest;
+  NGAP_BroadcastSessionReleaseRequestIEs_t *ie;
+  ngap_gNB_amf_data_t *amf_desc_p = ngap_gNB_get_AMF(NULL, assoc_id, 0);
+  if (amf_desc_p == NULL) {
+    NGAP_ERROR("[SCTP %u] Received broadcast session release for non existing AMF context\n", assoc_id);
+    return -1;
+  }
+  NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_BroadcastSessionReleaseRequestIEs_t, ie, container, NGAP_ProtocolIE_ID_id_MBS_SessionID, true);
+  if (ie == NULL) {
+    NGAP_ERROR("[SCTP %u] Broadcast session release without an MBS Session ID\n", assoc_id);
+    return -1;
+  }
+  const NGAP_TMGI_t *tmgi = &ie->value.choice.MBS_SessionID.tMGI;
+  if (tmgi->size != sizeof(mbs_broadcast_sessions[0].tmgi)) {
+    NGAP_ERROR("[SCTP %u] Broadcast session release with a malformed TMGI (%d octets)\n", assoc_id, (int)tmgi->size);
+    return -1;
+  }
+  const int k = mbs_broadcast_session_find(tmgi->buf);
+  if (k >= 0) {
+    mbs_broadcast_session_release(k);
+    NGAP_INFO("[SCTP %u] Broadcast session released\n", assoc_id);
+  } else {
+    /* answered all the same: the session is not there, which is what was asked for */
+    NGAP_WARN("[SCTP %u] Release of a broadcast session this gNB does not have\n", assoc_id);
+  }
+
+  NGAP_NGAP_PDU_t out = {0};
+  out.present = NGAP_NGAP_PDU_PR_successfulOutcome;
+  asn1cCalloc(out.choice.successfulOutcome, head);
+  head->procedureCode = NGAP_ProcedureCode_id_BroadcastSessionRelease;
+  head->criticality = NGAP_Criticality_reject;
+  head->value.present = NGAP_SuccessfulOutcome__value_PR_BroadcastSessionReleaseResponse;
+  NGAP_BroadcastSessionReleaseResponse_t *resp = &head->value.choice.BroadcastSessionReleaseResponse;
+  asn1cSequenceAdd(resp->protocolIEs.list, NGAP_BroadcastSessionReleaseResponseIEs_t, resp_ie);
+  resp_ie->id = NGAP_ProtocolIE_ID_id_MBS_SessionID;
+  resp_ie->criticality = NGAP_Criticality_reject;
+  resp_ie->value.present = NGAP_BroadcastSessionReleaseResponseIEs__value_PR_MBS_SessionID;
+  OCTET_STRING_fromBuf(&resp_ie->value.choice.MBS_SessionID.tMGI, (const char *)tmgi->buf, tmgi->size);
+
+  uint8_t *buffer = NULL;
+  uint32_t length = 0;
+  if (ngap_gNB_encode_pdu(&out, &buffer, &length) < 0) {
+    NGAP_ERROR("[SCTP %u] Failed to encode broadcast session release response\n", assoc_id);
+    ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NGAP_NGAP_PDU, &out);
+    return -1;
+  }
+  ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NGAP_NGAP_PDU, &out);
+  ngap_gNB_itti_send_sctp_data_req(amf_desc_p->ngap_gNB_instance->instance, assoc_id, buffer, length, 0);
   return 0;
 }
 
 typedef int (*ngap_message_decoded_callback)(sctp_assoc_t assoc_id, uint32_t stream, NGAP_NGAP_PDU_t *pdu);
 
 /* Handlers matrix. Only gNB related procedure present here */
+/* The multicast MBS sessions this gNB has been told about, and whether the core has asked for each
+ * to be activated (TS 38.413 V17.10.0 clause 8.18.3: "the NG-RAN node activates the previously
+ * requested MBS session resources"). Kept next to the broadcast session above for the same reason:
+ * there is no MBS session manager in RRC yet to own it. Tomorrow's radio work reads this to know
+ * which sessions need a G-RNTI and a multicast MRB. */
+#define NGAP_MAX_MULTICAST_SESSIONS 8
+static struct {
+  bool known;
+  bool active;
+  uint8_t tmgi[6];
+} mbs_multicast_sessions[NGAP_MAX_MULTICAST_SESSIONS];
+
+static void tmgi_to_hex(const uint8_t *tmgi, int size, char *out, size_t out_size)
+{
+  for (int i = 0; i < size && (size_t)(2 * i + 3) <= out_size; i++)
+    snprintf(out + 2 * i, 3, "%02x", tmgi[i]);
+}
+
+/* The entry of this TMGI, created on first sight. -1 when the table is full. The table is read and
+ * written only by the NGAP task, so it needs no locking; the per-UE membership that RRC keeps is the
+ * CU-side state the radio work will read. */
+static int multicast_session_index(const uint8_t *tmgi)
+{
+  int free_slot = -1;
+
+  for (int i = 0; i < NGAP_MAX_MULTICAST_SESSIONS; i++) {
+    if (mbs_multicast_sessions[i].known) {
+      if (memcmp(mbs_multicast_sessions[i].tmgi, tmgi, 6) == 0)
+        return i;
+    } else if (free_slot < 0) {
+      free_slot = i;
+    }
+  }
+
+  if (free_slot < 0)
+    return -1;
+
+  mbs_multicast_sessions[free_slot].known = true;
+  memcpy(mbs_multicast_sessions[free_slot].tmgi, tmgi, 6);
+  return free_slot;
+}
+
+/* MulticastSessionActivationRequest (TS 38.413 V17.10.0 clause 8.18.3, procedure code 71).
+ *
+ * Non UE-associated: the AMF asks the gNB to activate the MBS session resources of a multicast
+ * session. Clause 8.18.3.2: the gNB "activates the previously requested MBS session resources
+ * corresponding to the MBS session indicated [...] and indicates in the MULTICAST SESSION ACTIVATION
+ * RESPONSE message for which MBS session the request was fulfilled."
+ *
+ * Activating the radio -- a G-RNTI, a multicast MRB, the DCI 4_2 scheduling -- is not built yet. What
+ * is recorded here is that the core wants the session on; the response says the request was fulfilled
+ * for that session, which is what the procedure asks the gNB to report, and the failure arm below is
+ * what it uses when it cannot.
+ */
+static int ngap_gNB_handle_multicast_session_activation(sctp_assoc_t assoc_id, uint32_t stream, NGAP_NGAP_PDU_t *pdu)
+{
+  NGAP_MulticastSessionActivationRequest_t *container;
+  NGAP_MulticastSessionActivationRequestIEs_t *ie;
+  ngap_gNB_amf_data_t *amf_desc_p;
+
+  DevAssert(pdu != NULL);
+  container = &pdu->choice.initiatingMessage->value.choice.MulticastSessionActivationRequest;
+
+  if ((amf_desc_p = ngap_gNB_get_AMF(NULL, assoc_id, 0)) == NULL) {
+    NGAP_ERROR("[SCTP %u] Received multicast session activation for non existing AMF context\n", assoc_id);
+    return -1;
+  }
+
+  NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_MulticastSessionActivationRequestIEs_t, ie, container, NGAP_ProtocolIE_ID_id_MBS_SessionID, true);
+  if (ie == NULL) {
+    NGAP_ERROR("[SCTP %u] Multicast session activation without an MBS Session ID\n", assoc_id);
+    return -1;
+  }
+
+  const NGAP_TMGI_t *tmgi = &ie->value.choice.MBS_SessionID.tMGI;
+  if (tmgi->size != 6) {
+    NGAP_ERROR("[SCTP %u] Multicast session activation with a %d-octet TMGI\n", assoc_id, (int)tmgi->size);
+    return -1;
+  }
+
+  char tmgi_hex[2 * 6 + 1] = {0};
+  tmgi_to_hex(tmgi->buf, tmgi->size, tmgi_hex, sizeof(tmgi_hex));
+
+  /* The transfer carries the same MBS Session ID again and nothing else
+   * (MulticastSessionActivationRequestTransfer ::= SEQUENCE { mBS-SessionID, iE-Extensions OPTIONAL }).
+   * It is decoded anyway: a core that puts a different session in it, or an undecodable one, is a bug
+   * worth seeing rather than a field to ignore. */
+  NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_MulticastSessionActivationRequestIEs_t,
+                             ie,
+                             container,
+                             NGAP_ProtocolIE_ID_id_MulticastSessionActivationRequestTransfer,
+                             false);
+  if (ie != NULL) {
+    void *decoded = decode_pdusession_transfer(&asn_DEF_NGAP_MulticastSessionActivationRequestTransfer,
+                                               ie->value.choice.OCTET_STRING_CONTAINING_MulticastSessionActivationRequestTransfer_);
+    if (decoded == NULL) {
+      NGAP_WARN("[SCTP %u] Multicast session activation with an undecodable transfer\n", assoc_id);
+    } else {
+      NGAP_MulticastSessionActivationRequestTransfer_t *transfer = decoded;
+      if (transfer->mBS_SessionID.tMGI.size != tmgi->size
+          || memcmp(transfer->mBS_SessionID.tMGI.buf, tmgi->buf, tmgi->size) != 0)
+        NGAP_WARN("[SCTP %u] Multicast session activation: the transfer names another MBS session\n", assoc_id);
+      ASN_STRUCT_FREE(asn_DEF_NGAP_MulticastSessionActivationRequestTransfer, transfer);
+    }
+  }
+
+  int index = multicast_session_index(tmgi->buf);
+  bool fulfilled = index >= 0;
+  if (fulfilled) {
+    mbs_multicast_sessions[index].active = true;
+    NGAP_INFO("[SCTP %u] Multicast session activation: TMGI %s is active\n", assoc_id, tmgi_hex);
+  } else {
+    NGAP_ERROR("[SCTP %u] Multicast session activation: no room for TMGI %s (%d sessions)\n",
+               assoc_id,
+               tmgi_hex,
+               NGAP_MAX_MULTICAST_SESSIONS);
+  }
+
+  NGAP_NGAP_PDU_t out = {0};
+  if (fulfilled) {
+    out.present = NGAP_NGAP_PDU_PR_successfulOutcome;
+    asn1cCalloc(out.choice.successfulOutcome, head);
+    head->procedureCode = NGAP_ProcedureCode_id_MulticastSessionActivation;
+    head->criticality = NGAP_Criticality_reject;
+    head->value.present = NGAP_SuccessfulOutcome__value_PR_MulticastSessionActivationResponse;
+    NGAP_MulticastSessionActivationResponse_t *resp = &head->value.choice.MulticastSessionActivationResponse;
+
+    asn1cSequenceAdd(resp->protocolIEs.list, NGAP_MulticastSessionActivationResponseIEs_t, resp_ie);
+    resp_ie->id = NGAP_ProtocolIE_ID_id_MBS_SessionID;
+    resp_ie->criticality = NGAP_Criticality_reject;
+    resp_ie->value.present = NGAP_MulticastSessionActivationResponseIEs__value_PR_MBS_SessionID;
+    OCTET_STRING_fromBuf(&resp_ie->value.choice.MBS_SessionID.tMGI, (const char *)tmgi->buf, tmgi->size);
+  } else {
+    /* Clause 8.18.3.3: "If the NG-RAN node cannot activate the previously requested MBS session
+     * resources [...] it shall respond with a MULTICAST SESSION ACTIVATION FAILURE message with an
+     * appropriate cause value." */
+    out.present = NGAP_NGAP_PDU_PR_unsuccessfulOutcome;
+    asn1cCalloc(out.choice.unsuccessfulOutcome, head);
+    head->procedureCode = NGAP_ProcedureCode_id_MulticastSessionActivation;
+    head->criticality = NGAP_Criticality_reject;
+    head->value.present = NGAP_UnsuccessfulOutcome__value_PR_MulticastSessionActivationFailure;
+    NGAP_MulticastSessionActivationFailure_t *fail = &head->value.choice.MulticastSessionActivationFailure;
+
+    {
+      asn1cSequenceAdd(fail->protocolIEs.list, NGAP_MulticastSessionActivationFailureIEs_t, fail_ie);
+      fail_ie->id = NGAP_ProtocolIE_ID_id_MBS_SessionID;
+      fail_ie->criticality = NGAP_Criticality_reject;
+      fail_ie->value.present = NGAP_MulticastSessionActivationFailureIEs__value_PR_MBS_SessionID;
+      OCTET_STRING_fromBuf(&fail_ie->value.choice.MBS_SessionID.tMGI, (const char *)tmgi->buf, tmgi->size);
+    }
+    {
+      asn1cSequenceAdd(fail->protocolIEs.list, NGAP_MulticastSessionActivationFailureIEs_t, fail_ie);
+      fail_ie->id = NGAP_ProtocolIE_ID_id_Cause;
+      fail_ie->criticality = NGAP_Criticality_ignore;
+      fail_ie->value.present = NGAP_MulticastSessionActivationFailureIEs__value_PR_Cause;
+      fail_ie->value.choice.Cause.present = NGAP_Cause_PR_radioNetwork;
+      fail_ie->value.choice.Cause.choice.radioNetwork = NGAP_CauseRadioNetwork_radio_resources_not_available;
+    }
+  }
+
+  uint8_t *buffer = NULL;
+  uint32_t length = 0;
+  if (ngap_gNB_encode_pdu(&out, &buffer, &length) < 0) {
+    NGAP_ERROR("[SCTP %u] Failed to encode the multicast session activation response\n", assoc_id);
+    ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NGAP_NGAP_PDU, &out);
+    return -1;
+  }
+  ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NGAP_NGAP_PDU, &out);
+
+  /* Non UE-associated signalling goes on stream 0, as the broadcast procedures above do. */
+  ngap_gNB_itti_send_sctp_data_req(amf_desc_p->ngap_gNB_instance->instance, assoc_id, buffer, length, 0);
+
+  return fulfilled ? 0 : -1;
+}
+
 const ngap_message_decoded_callback ngap_messages_callback[][3] = {
     {0, 0, 0}, /* AMFConfigurationUpdate */
     {0, 0, 0}, /* AMFStatusIndication */
@@ -1763,11 +2129,11 @@ const ngap_message_decoded_callback ngap_messages_callback[][3] = {
     {0, 0, 0}, /* AMFCPRelocationIndication */
     {0, 0, 0}, /* ConnectionEstablishmentIndication */
     {0, 0, 0}, /* BroadcastSessionModification */
-    {0, 0, 0}, /* BroadcastSessionRelease */
+    {ngap_gNB_handle_broadcast_session_release, 0, 0}, /* BroadcastSessionRelease */
     {ngap_gNB_handle_broadcast_session_setup, 0, 0}, /* BroadcastSessionSetup */
     {0, 0, 0}, /* DistributionSetup */
     {0, 0, 0}, /* DistributionRelease */
-    {0, 0, 0}, /* MulticastSessionActivation */
+    {ngap_gNB_handle_multicast_session_activation, 0, 0}, /* MulticastSessionActivation */
     {0, 0, 0}, /* MulticastSessionDeactivation */
     {0, 0, 0}, /* MulticastSessionUpdate */
     {0, 0, 0}, /* MulticastGroupPaging */

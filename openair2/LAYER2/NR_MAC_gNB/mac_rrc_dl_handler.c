@@ -1412,6 +1412,20 @@ void positioning_measurement_request(const f1ap_positioning_measurement_req_t *r
   NR_SCHED_UNLOCK(&mac->sched_lock);
 }
 
+/* The LCID of a new MBS group's MTCH: one no other group of the cell uses, from 32 down. The UE keeps one RLC entity
+ * per LCID for all its MBS sessions, so two sessions on one LCID would be mixed up there. 0 if none is left. */
+static logical_chan_id_t mbs_free_lcid(const gNB_MAC_INST *mac, const nr_cell_sched_t *cell)
+{
+  for (logical_chan_id_t lcid = 32; lcid >= 4; lcid--) {
+    bool used = false;
+    for (nr_mbs_group_t *const *g = mac->UE_info.mbs_group_list; *g != NULL && !used; g++)
+      used = (*g)->cell == cell && (*g)->config.lcid == lcid;
+    if (!used)
+      return lcid;
+  }
+  return 0;
+}
+
 /* Broadcast Context Setup, at the DU.
  *
  * The session the core created has reached the component that puts it on the
@@ -1434,19 +1448,18 @@ void broadcast_context_setup(const f1ap_broadcast_ctx_setup_t *req)
   nr_mbs_group_config_t config = {
       .config_id = 0,
       .mrb_id = req->mrb_id,
-      /* LCID 32 is the MTCH, and four HARQ processes reserved for PTM --
-       * the values his test adapter used. They belong in the F1AP message
-       * once TS 38.473 carries them. */
-      .lcid = 32,
+      /* an MTCH LCID of its own, and four HARQ processes reserved for PTM.
+       * They belong in the F1AP message once TS 38.473 carries them. */
+      .lcid = mbs_free_lcid(mac, cell),
       .harq_feedback = NR_MBS_HARQ_FEEDBACK_DISABLED,
       .num_harq = 4,
       .broadcast = true,
-      /* The highest QPSK entry of the table. It belongs in the
-       * configuration, next to whatever decides the coverage of a session. */
-      .mcs = 9,
+      /* From the configuration (mbs_broadcast_mcs): one value for the cell,
+       * until a session brings its own requirements along. */
+      .mcs = cell->mbs_broadcast_mcs,
   };
   memcpy(config.tmgi, req->tmgi, sizeof(config.tmgi));
-  const nr_mbs_group_t *group = nr_mac_add_mbs_group(mac, cell, &config);
+  const nr_mbs_group_t *group = config.lcid ? nr_mac_add_mbs_group(mac, cell, &config) : NULL;
   /* Announce it: from here on any UE that reads SIB20 can receive the
    * session, connected or not, and the gNB does not know which ones do. */
   const bool announced = group != NULL && nr_mac_update_sib20(cell);
@@ -1471,4 +1484,133 @@ void broadcast_context_setup(const f1ap_broadcast_ctx_setup_t *req)
   const ue_id_t pdcp_context = NR_PDCP_MBS_CONTEXT_ID(group->g_rnti);
   nr_pdcp_add_mrb(true, pdcp_context, req->mrb_id, 0, NR_MBS_TEST_PDCP_SN_SIZE, NR_MBS_TEST_PDCP_T_REORDERING);
   nr_pdcp_mbs_set_context(pdcp_context, req->mrb_id);
+}
+
+/* Takes a broadcast session off the air: the group and its RLC entity go, and
+ * SIB20 stops announcing it, which is how the receivers find out. */
+void broadcast_context_release(const f1ap_broadcast_ctx_release_t *req)
+{
+  DevAssert(req != NULL);
+  gNB_MAC_INST *mac = RC.nrmac[0];
+  NR_SCHED_LOCK(&mac->sched_lock);
+  const nr_mbs_group_t *group = NULL;
+  for (nr_mbs_group_t *const *g = mac->UE_info.mbs_group_list; *g != NULL && group == NULL; g++) {
+    if ((*g)->config.broadcast && memcmp((*g)->config.tmgi, req->tmgi, sizeof(req->tmgi)) == 0)
+      group = *g;
+  }
+  if (group == NULL) {
+    NR_SCHED_UNLOCK(&mac->sched_lock);
+    LOG_E(NR_MAC, "MBS: release of a broadcast session this DU does not have\n");
+    return;
+  }
+  const rnti_t g_rnti = group->g_rnti;
+  const int mrb_id = group->config.mrb_id;
+  nr_cell_sched_t *cell = group->cell;
+  nr_mac_release_mbs_group(mac, g_rnti);
+  nr_mac_update_sib20(cell);
+  NR_SCHED_UNLOCK(&mac->sched_lock);
+
+  /* the MRB was created here, so it goes here too */
+  nr_pdcp_mbs_set_context(0, mrb_id);
+  nr_pdcp_remove_UE(NR_PDCP_MBS_CONTEXT_ID(g_rnti));
+  LOG_A(NR_MAC,
+        "MBS: broadcast session for TMGI %02x%02x%02x%02x%02x%02x released, G-RNTI %04x\n",
+        req->tmgi[0], req->tmgi[1], req->tmgi[2], req->tmgi[3], req->tmgi[4], req->tmgi[5],
+        g_rnti);
+}
+
+/* A UE joins a multicast session, at the DU (TS 38.473: Multicast Context
+ * Setup of the session, then the UE's Multicast MBS Session list).
+ *
+ * The session's group is created with its first member: unlike broadcast it
+ * is only transmitted towards UEs that joined, so it needs no announcement and
+ * nothing to do before the first one. Members report ACK/NACK, a NACK being
+ * retransmitted point-to-point, and the PTM transmissions use DCI 4_2. Adding
+ * the member configures the G-RNTI and the PTM RLC entity in the UE's
+ * CellGroupConfig, which reaches the UE in an RRCReconfiguration. */
+void multicast_ue_join(const f1ap_multicast_ue_join_t *req)
+{
+  DevAssert(req != NULL);
+  gNB_MAC_INST *mac = RC.nrmac[0];
+  NR_SCHED_LOCK(&mac->sched_lock);
+  NR_UE_info_t *UE = find_connected_nr_ue(&mac->UE_info, req->gNB_DU_ue_id);
+  if (UE == NULL) {
+    NR_SCHED_UNLOCK(&mac->sched_lock);
+    LOG_E(NR_MAC, "MBS: multicast join of unknown UE %04x\n", req->gNB_DU_ue_id);
+    return;
+  }
+  nr_mbs_group_t *group = NULL;
+  int num_multicast = 0;
+  for (nr_mbs_group_t *const *g = mac->UE_info.mbs_group_list; *g != NULL; g++) {
+    if ((*g)->config.broadcast)
+      continue;
+    num_multicast++;
+    if ((*g)->cell == UE->pcell && memcmp((*g)->config.tmgi, req->tmgi, sizeof(req->tmgi)) == 0)
+      group = *g;
+  }
+  const bool created = group == NULL;
+  if (created) {
+    nr_mbs_group_config_t config = {
+        /* one mbs-RNTI-SpecificConfig per multicast session a UE may hold */
+        .config_id = num_multicast,
+        .mrb_id = req->mrb_id,
+        /* an MTCH LCID of its own, and four PTM HARQ processes, as for broadcast */
+        .lcid = mbs_free_lcid(mac, UE->pcell),
+        .harq_feedback = NR_MBS_HARQ_FEEDBACK_ACK_NACK,
+        .dci_4_2 = true,
+        .num_harq = 4,
+    };
+    memcpy(config.tmgi, req->tmgi, sizeof(config.tmgi));
+    group = config.lcid ? nr_mac_add_mbs_group(mac, UE->pcell, &config) : NULL;
+  }
+  const bool joined = group != NULL && nr_mac_join_mbs_member(mac, group, UE);
+  const rnti_t g_rnti = group ? group->g_rnti : 0;
+  NR_SCHED_UNLOCK(&mac->sched_lock);
+  if (group == NULL) {
+    LOG_E(NR_MAC, "MBS: could not create the multicast group for MRB %ld\n", req->mrb_id);
+    return;
+  }
+  if (created) {
+    LOG_A(NR_MAC,
+          "MBS: multicast group for TMGI %02x%02x%02x%02x%02x%02x on G-RNTI %04x, MRB %ld\n",
+          req->tmgi[0], req->tmgi[1], req->tmgi[2], req->tmgi[3], req->tmgi[4], req->tmgi[5],
+          g_rnti, req->mrb_id);
+    /* The session's MRB. As for broadcast, it lands here because its PDCP
+     * context is derived from the G-RNTI the MAC just allocated. */
+    nr_pdcp_add_mrb(true, NR_PDCP_MBS_CONTEXT_ID(g_rnti), req->mrb_id, 0, NR_MBS_TEST_PDCP_SN_SIZE, NR_MBS_TEST_PDCP_T_REORDERING);
+  }
+  if (!joined)
+    LOG_E(NR_MAC, "MBS: UE %04x cannot join the multicast group G-RNTI %04x\n", req->gNB_DU_ue_id, g_rnti);
+}
+
+/* A UE leaves a multicast session, at the DU: the counterpart of multicast_ue_join(). The UE is released from the
+ * session's G-RNTI and PTM RLC entity in an RRCReconfiguration. When the last member is gone, the group goes too: the
+ * gNB transmits a multicast session only towards UEs that joined it. */
+void multicast_ue_leave(const f1ap_multicast_ue_leave_t *req)
+{
+  DevAssert(req != NULL);
+  gNB_MAC_INST *mac = RC.nrmac[0];
+  NR_SCHED_LOCK(&mac->sched_lock);
+  NR_UE_info_t *UE = find_connected_nr_ue(&mac->UE_info, req->gNB_DU_ue_id);
+  nr_mbs_group_t *group = NULL;
+  for (nr_mbs_group_t *const *g = mac->UE_info.mbs_group_list; *g != NULL && group == NULL; g++)
+    if (!(*g)->config.broadcast && memcmp((*g)->config.tmgi, req->tmgi, sizeof(req->tmgi)) == 0)
+      group = *g;
+  if (UE == NULL || group == NULL) {
+    NR_SCHED_UNLOCK(&mac->sched_lock);
+    LOG_W(NR_MAC, "MBS: multicast leave of UE %04x from a group this DU does not have\n", req->gNB_DU_ue_id);
+    return;
+  }
+  nr_mac_leave_mbs_member(mac, group, UE);
+  const rnti_t g_rnti = group->g_rnti;
+  const bool empty = group->num_members == 0 && group->num_pending == 0;
+  if (empty)
+    nr_mac_release_mbs_group(mac, g_rnti);
+  NR_SCHED_UNLOCK(&mac->sched_lock);
+  if (empty) {
+    nr_pdcp_remove_UE(NR_PDCP_MBS_CONTEXT_ID(g_rnti));
+    LOG_A(NR_MAC,
+          "MBS: last member left, multicast group for TMGI %02x%02x%02x%02x%02x%02x on G-RNTI %04x released\n",
+          req->tmgi[0], req->tmgi[1], req->tmgi[2], req->tmgi[3], req->tmgi[4], req->tmgi[5], g_rnti);
+  }
 }

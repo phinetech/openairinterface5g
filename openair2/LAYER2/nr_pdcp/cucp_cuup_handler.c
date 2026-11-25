@@ -146,6 +146,35 @@ static instance_t get_n3_gtp_instance(void)
  * monolithic gNB, and over E1AP when the CU is split. Only the caller
  * differs -- what has to happen is the same, because N3 terminates wherever
  * the user plane lives. */
+/* the broadcast tunnel being terminated: one session for now */
+/* The user plane of the broadcast sessions, by the session's E1 context id. Sessions the 5GC distributes to the same
+ * group share one socket: two sockets joined to one group would each receive, and deliver, every packet. */
+#define MBS_BC_MAX_TUNNELS 8
+static struct {
+  bool up;
+  uint32_t e1ap_id;
+  in_addr_t group;
+  in_addr_t source;
+  instance_t group_instance;
+  teid_t c_teid;
+} mbs_bc_tunnels[MBS_BC_MAX_TUNNELS];
+
+static int mbs_bc_tunnel_find(uint32_t e1ap_id)
+{
+  for (int i = 0; i < MBS_BC_MAX_TUNNELS; i++)
+    if (mbs_bc_tunnels[i].up && mbs_bc_tunnels[i].e1ap_id == e1ap_id)
+      return i;
+  return -1;
+}
+
+static int mbs_bc_group_find(in_addr_t group, in_addr_t source)
+{
+  for (int i = 0; i < MBS_BC_MAX_TUNNELS; i++)
+    if (mbs_bc_tunnels[i].up && mbs_bc_tunnels[i].group == group && mbs_bc_tunnels[i].source == source)
+      return i;
+  return -1;
+}
+
 void e1_bc_bearer_context_setup(const e1ap_bc_bearer_setup_req_t *req)
 {
   LOG_A(E1AP,
@@ -156,18 +185,61 @@ void e1_bc_bearer_context_setup(const e1ap_bc_bearer_setup_req_t *req)
     LOG_W(E1AP, "MBS: broadcast bearer context without a tunnel, nothing to terminate\n");
     return;
   }
-  const instance_t n3inst = get_n3_gtp_instance();
-  const in_addr_t local = gtpv1uGetLocalAddr(n3inst);
-  const instance_t mc = gtpv1InitMulticast(req->multicast_addr, req->source_addr, local, 2152);
-  if (mc < 0) {
-    LOG_E(E1AP, "MBS: could not join the broadcast group, the session will not deliver\n");
+  if (mbs_bc_tunnel_find(req->gNB_cu_cp_mbs_e1ap_id) >= 0) {
+    LOG_W(E1AP, "MBS: broadcast bearer context %u already has its tunnel\n", req->gNB_cu_cp_mbs_e1ap_id);
     return;
   }
+  int t = 0;
+  while (t < MBS_BC_MAX_TUNNELS && mbs_bc_tunnels[t].up)
+    t++;
+  if (t == MBS_BC_MAX_TUNNELS) {
+    LOG_E(E1AP, "MBS: more than %d broadcast tunnels, the session will not deliver\n", MBS_BC_MAX_TUNNELS);
+    return;
+  }
+  const int shared = mbs_bc_group_find(req->multicast_addr, req->source_addr);
+  instance_t mc;
+  if (shared >= 0) {
+    mc = mbs_bc_tunnels[shared].group_instance;
+  } else {
+    const instance_t n3inst = get_n3_gtp_instance();
+    const in_addr_t local = gtpv1uGetLocalAddr(n3inst);
+    mc = gtpv1InitMulticast(req->multicast_addr, req->source_addr, local, 2152);
+    if (mc < 0) {
+      LOG_E(E1AP, "MBS: could not join the broadcast group, the session will not deliver\n");
+      return;
+    }
+  }
+  /* the MRB travels with the TEID, so that the payload reaches the session's own MRB */
   if (!gtpv1uRegisterIncomingTeid(req->c_teid, 0, req->mrb_id, nr_pdcp_mbs_broadcast_deliver)) {
     LOG_E(E1AP, "MBS: could not listen on the broadcast TEID 0x%x\n", req->c_teid);
+    if (shared < 0)
+      gtpv1Term(mc);
     return;
   }
+  mbs_bc_tunnels[t].up = true;
+  mbs_bc_tunnels[t].e1ap_id = req->gNB_cu_cp_mbs_e1ap_id;
+  mbs_bc_tunnels[t].group = req->multicast_addr;
+  mbs_bc_tunnels[t].source = req->source_addr;
+  mbs_bc_tunnels[t].group_instance = mc;
+  mbs_bc_tunnels[t].c_teid = req->c_teid;
   LOG_A(E1AP, "MBS: broadcast user plane up on TEID 0x%x\n", req->c_teid);
+}
+
+/* Take a broadcast session's user plane down again: stop listening on its
+ * TEID, and leave the group the 5GC distributes it to unless another session
+ * still uses it. Reached the same two ways as the setup. */
+void e1_bc_bearer_context_release(uint32_t gNB_cu_cp_mbs_e1ap_id)
+{
+  const int t = mbs_bc_tunnel_find(gNB_cu_cp_mbs_e1ap_id);
+  if (t < 0) {
+    LOG_W(E1AP, "MBS: no broadcast user plane %u to release\n", gNB_cu_cp_mbs_e1ap_id);
+    return;
+  }
+  gtpv1uUnregisterIncomingTeid(mbs_bc_tunnels[t].c_teid);
+  mbs_bc_tunnels[t].up = false;
+  if (mbs_bc_group_find(mbs_bc_tunnels[t].group, mbs_bc_tunnels[t].source) < 0)
+    gtpv1Term(mbs_bc_tunnels[t].group_instance);
+  LOG_A(E1AP, "MBS: broadcast user plane released, TEID 0x%x\n", mbs_bc_tunnels[t].c_teid);
 }
 
 /** @brief Fill and send request to create GTP-U tunnel (N3). One tunnel per PDU session. */

@@ -43,6 +43,7 @@ void nr_pdcp_add_drb(int is_gnb,
 #define NR_PDCP_MBS_CONTEXT_ID(g_rnti) ((1ULL << 32) | (g_rnti))
 #define NR_PDCP_MBS_G_RNTI(context_id) ((rnti_t)((context_id) & 0xffff))
 void nr_pdcp_add_mrb(bool is_gnb, ue_id_t ue_id, int mrb_id, int pdusession_id, int sn_size, int t_reordering);
+void nr_pdcp_release_mrb(ue_id_t ue_id, int mrb_id);
 bool nr_pdcp_mrb_data_req(ue_id_t ue_id, int mrb_id, const uint8_t *buf, int size);
 bool nr_pdcp_mrb_data_ind(ue_id_t ue_id, int mrb_id, int size, uint8_t *buf);
 

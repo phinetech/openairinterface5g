@@ -2,6 +2,11 @@
 
 # Multicast Broadcast Services (MBS) in 5G
 
+> This work is part of the ESA activity **AD-SAT** (*Provision of Broadband
+> Control Centre Services for Autonomous Driving over Satellite
+> Constellations*, activity 3F.049) with Frequentis AG. See the
+> [project page](https://connectivity.esa.int/?p=26285).
+
 ## Overview
 
 The gNB sends one PTM transmission on a G-RNTI with DCI format 4_1 or 4_2 in a common search space,
@@ -18,8 +23,17 @@ setup and its shared N3 user plane are also implemented; see the
 [broadcast tutorial](MBS_Broadcast_Tutorial.md). Broadcast has no membership or
 HARQ feedback and currently uses DCI 4_1.
 
-Remaining multicast radio features:
+A UE can also join a multicast session through the core, see
+[Multicast join through the core](#multicast-join-through-the-core).
 
+Remaining multicast features:
+
+- The shared N3 tunnel of a multicast session (Distribution Setup, TS 23.247
+  §7.2.1.4): until it exists, the test adapter supplies the data.
+- Releasing the shared N3 tunnel when the last member leaves (Distribution
+  Release, TS 23.247 §7.2.2.4); the gNB already drops the group then.
+- Multicast over a CU/DU split (F1AP Multicast Context Setup and the multicast
+  part of UE Context Modification, TS 38.473).
 - 3GPP also allows PTM retransmissions (TS 38.300 §16.10.5.4 / TS 38.213 §18).
 - NACK-Only HARQ-ACK and a CFR smaller than the BWP (TS 38.213 §18)
 
@@ -53,6 +67,63 @@ Before you start run to get info
 # Terminal 6
 ./tools/scripts/mbs.sh dl 1
 ```
+
+## Multicast join through the core
+
+Here the UE asks to join, and only the UEs that joined are configured: no
+test adapter decides who is a member.
+
+1. The UE sends a PDU Session Modification Request with the Requested MBS
+   container (TS 24.501), on its first active PDU session. Trigger it from
+   the UE's telnet server (`--telnetsrv --telnetsrv.shrmod ciUE`):
+
+   ```bash
+   echo "ciUE mbs_join <TMGI>" | nc -q1 <UE address> 9090
+   ```
+
+   The TMGI is 12 hex characters: the 3-octet MBS Service ID, then the PLMN
+   (999/70 is `99f907`). `ciUE mbs_leave <TMGI>` sends the leave
+   (TS 23.247 §7.2.2.2): the core answers the UE, sends the gNB the MBS Session
+   To Release List, and the gNB releases the UE's G-RNTI, PTM RLC entity and
+   MRB in an RRCReconfiguration. When the last member has left, the gNB drops
+   the group.
+2. The core answers the UE, associates its PDU session with the session in a
+   PDU Session Resource Modify Request, and activates the session with
+   Multicast Session Activation. The core must support the multicast join
+   and leave; the core of the broadcast tutorial does not. An image that
+   does, built from 5G-MAG's `feature/mbs-broadcast-rel19` with the join and
+   leave added, is on Docker Hub; use it in place of the tutorial's core:
+
+   ```bash
+   docker pull phinetech/open5gs_core:mbs-mc
+   CN_IMG=phinetech/open5gs_core:mbs-mc docker compose up -d
+   ```
+3. The gNB-CU records the membership and hands the join to the DU. The DU
+   creates the session's group on its first member (DCI 4_2, ACK/NACK
+   feedback) and configures the UE: G-RNTI and PTM RLC entity in its
+   CellGroupConfig. The CU adds the MRB-ToAddMod of the session, and the UE
+   receives both in one RRCReconfiguration.
+
+Only a monolithic gNB can do this. The session's shared N3 tunnel does not
+exist yet, so the data comes from the test adapter: with `join_ues = 0` it
+creates no group and joins no UE, and sends numbered IPv4/UDP datagrams on
+every multicast group with members.
+
+```
+MBS_TEST = (
+  {
+    join_ues = 0;
+    sdu_interval_ms = 100;
+    sdu_size = 200;
+    udp_dst_addr = "239.0.0.26";
+    udp_dst_port = 12345;
+  }
+);
+```
+
+An application on a UE that joined receives them on `udp_dst_addr`:
+`udp_dst_port` at its PDU session interface; a UE that did not join receives
+nothing.
 
 ## DCI format 4_2
 
@@ -113,8 +184,8 @@ use `MBS_TEST` or redirect a UE's unicast traffic.
 Broadcast MRB creation at the gNB still uses fixed PDCP parameters in
 `broadcast_context_setup()` at the DU. E1AP/F1AP setup signalling exists, but
 MRB data cannot cross a CU/DU split: `deliver_pdu_mrb_gnb()` still delivers
-locally to RLC. The broadcast session-to-PDCP mapping is also limited to one
-session. See the [broadcast tutorial's gaps](MBS_Broadcast_Tutorial.md#known-gaps)
+locally to RLC. Several broadcast sessions can run at once, each with its own
+tunnel, MRB, G-RNTI and MTCH LCID; the UE tells them apart by their LCID. See the [broadcast tutorial's gaps](MBS_Broadcast_Tutorial.md#known-gaps)
 for the MCCH, DCI and UE-interface limitations.
 
 The call graphs below show implemented multicast functions. Their TODO lists
@@ -137,11 +208,22 @@ executables/nr-softmodem.c                                      main()
             └─ openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_mbs.c   nr_mac_add_mbs_group()
 ```
 
+For a multicast join through the core, the group is created with its first
+member:
+
+```bash
+openair2/RRC/NR/rrc_gNB_NGAP.c                          rrc_gNB_process_mbs_join()
+└─ openair2/RRC/NR/rrc_gNB_NGAP.c                       rrc_gNB_mbs_join_du()
+   └─ openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.c   multicast_ue_join()
+      ├─ openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_mbs.c nr_mac_add_mbs_group()
+      └─ openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c      nr_pdcp_add_mrb()
+```
+
 **[TODO]**
 
 - `nr_mac_add_mbs_group()`:
-  - Today: Creates the group from `nr_mbs_group_config_t` and returns its G-RNTI. The multicast test adapter supplies the `MBS_TEST` settings; the broadcast path calls the same function from `broadcast_context_setup()` with the core's session identity.
-  - TODO: Add the F1AP **Multicast** Context Setup caller (TS 38.473 §8.14.6), using the session's configuration. The implemented Broadcast Context Setup does not handle this multicast procedure.
+  - Today: Creates the group from `nr_mbs_group_config_t` and returns its G-RNTI. The multicast test adapter supplies the `MBS_TEST` settings; the broadcast path calls the same function from `broadcast_context_setup()` with the core's session identity; a multicast join through the core calls it from `multicast_ue_join()` on the session's first member, with fixed settings (DCI 4_2, ACK/NACK feedback, four PTM HARQ processes).
+  - TODO: Encode the join over F1AP (Multicast Context Setup, TS 38.473 §8.14.6) for a CU/DU split; `multicast_ue_join_f1ap()` only logs that it is not supported. Take the settings from the session's configuration.
 
 ### Joining a UE to MBS
 
@@ -151,6 +233,8 @@ executables/nr-softmodem.c                                      main()
 4. Once the group has a member, creates the MRB PDCP.
 5. The UE creates its MRB PDCP and configures the G-RNTI and the search space.
 
+With the test adapter (`join_ues = 1`):
+
 ```bash
 openair2/LAYER2/NR_MAC_gNB/nr_mbs_test_adapter.c              nr_mbs_test_thread()
 ├─ openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_mbs.c             nr_mac_add_mbs_member()
@@ -159,8 +243,24 @@ openair2/LAYER2/NR_MAC_gNB/nr_mbs_test_adapter.c              nr_mbs_test_thread
 └─ openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c                  nr_pdcp_add_mrb()
 ```
 
+Through the core, the DU adds the member, and the CU adds the MRB to the
+RRCReconfiguration it sends for the new CellGroupConfig. A join that arrives
+during another reconfiguration of the UE is applied when that one is over
+(`add_pending_members()`):
+
+```bash
+openair2/LAYER2/NR_MAC_gNB/mac_rrc_dl_handler.c        multicast_ue_join()
+└─ openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_mbs.c      nr_mac_join_mbs_member()
+   └─ openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_mbs.c   nr_mac_add_mbs_member()
+
+openair2/RRC/NR/rrc_gNB.c                              nr_rrc_reconfiguration_req()
+└─ openair2/RRC/NR/rrc_gNB.c                           get_new_mrbs()
+```
+
 ```bash
 openair2/RRC/NR_UE/rrc_UE.c                   nr_rrc_ue_process_rrcReconfiguration()
+├─ openair2/RRC/NR_UE/rrc_UE.c                nr_rrc_ue_process_RadioBearerConfig()
+│  └─ openair2/RRC/NR_UE/rrc_UE.c             nr_rrc_add_mrb()
 ├─ openair2/RRC/NR_UE/rrc_UE.c                nr_rrc_add_mbs_test_mrb()
 └─ openair2/LAYER2/NR_MAC_UE/config_ue.c      nr_rrc_mac_config_req_cg()
    ├─ openair2/LAYER2/NR_MAC_UE/config_ue.c   configure_g_rnti()
@@ -170,20 +270,20 @@ openair2/RRC/NR_UE/rrc_UE.c                   nr_rrc_ue_process_rrcReconfigurati
 **[TODO]**
 
 - `nr_mac_add_mbs_member()`
-  - Today: Adds the multicast part to the CellGroupConfig of the UE and sends it to the CU and reserves the PTM HARQ processes. The test adapter (`join_ues()`) calls it every 100 ms for every connected UE.
-  - TODO: Keep the function as is but call it when the DU receives a UE Context Setup/Modification that carries the multicast session of the UE (Multicast MBS Session List, TS 38.473 §9.3.1.272).
+  - Today: Adds the multicast part to the CellGroupConfig of the UE and sends it to the CU and reserves the PTM HARQ processes. A join through the core calls it from `multicast_ue_join()`; the test adapter with `join_ues = 1` (`join_ues()`) calls it every 100 ms for every connected UE.
+  - TODO: With a CU/DU split, call it when the DU receives a UE Context Setup/Modification that carries the multicast session of the UE (Multicast MBS Session List, TS 38.473 §9.3.1.272). Leaving goes through `multicast_ue_leave()` and `nr_mac_leave_mbs_member()`, which releases the UE's G-RNTI and PTM RLC entity.
 
 - `nr_mac_request_reconfiguration()`
-  - Today: Sends the new CellGroupConfig to the CU in a UE Context Modification Required. The CU sends it to the UE in an RRCReconfiguration, but without any MRB-ToAddMod. If the CU refuses, `ue_context_modification_refuse()` (`mac_rrc_dl_handler.c`) removes the UE from the group again.
-  - TODO: The CU RRC adds the MRB-ToAddMod of the session to that RRCReconfiguration. If the CU builds the multicast CellGroupConfig itself, remove the call of `add_mbs_cellGroupConfig()` in `nr_mac_add_mbs_member()`, which then only keeps the MAC state.
+  - Today: Sends the new CellGroupConfig to the CU in a UE Context Modification Required. The CU sends it to the UE in an RRCReconfiguration, with the MRB-ToAddMod of each session the UE joined through the core and was not configured for yet (`get_new_mrbs()`). If the CU refuses, `ue_context_modification_refuse()` (`mac_rrc_dl_handler.c`) removes the UE from the group again.
+  - TODO: If the CU builds the multicast CellGroupConfig itself, remove the call of `add_mbs_cellGroupConfig()` in `nr_mac_add_mbs_member()`, which then only keeps the MAC state.
 
 - `nr_pdcp_add_mrb()`
-  - Today: Creates the gNB MRB PDCP entity, without ciphering or integrity (TS 38.323 §5.8, §5.9). The multicast adapter calls it on the first join; broadcast calls it from `broadcast_context_setup()`. Both use the fixed SN size and t-Reordering of `nr_pdcp_mbs_test.h`.
+  - Today: Creates the gNB MRB PDCP entity, without ciphering or integrity (TS 38.323 §5.8, §5.9). The multicast adapter calls it on the first join, `multicast_ue_join()` when it creates the group, and broadcast from `broadcast_context_setup()`. All use the fixed SN size and t-Reordering of `nr_pdcp_mbs_test.h`; for a join through the core, the CU signals the same values to the UE in the MRB-ToAddMod.
   - TODO: Create the gNB MRB from CU-UP bearer setup using the session's PDCP-Config, and carry the DU-allocated group context to the CU-UP. E1AP broadcast setup currently creates the tunnel, not the MRB PDCP. Remove the fixed test parameters once both services use signalled configuration.
 
 - `nr_rrc_add_mbs_test_mrb()`
-  - Today: When the UE receives the PTM RLC bearer, it creates its own MRB PDCP with the fixed values of `nr_pdcp_mbs_test.h`, attached to its first PDU session. This is needed because no MRB-ToAddMod is received.
-  - TODO: For multicast, replace this helper with MRB PDCP creation from the MRB-ToAddMod of RadioBearerConfig (TS 38.331 §6.3.2). Broadcast already uses its announced MRB-InfoBroadcast through `nr_rrc_ue_add_mbs_broadcast_mrb()` and does not call this helper.
+  - Today: After a join through the core, the UE creates its MRB PDCP from the MRB-ToAddMod of RadioBearerConfig (TS 38.331 §6.3.2, `nr_rrc_add_mrb()`), attached to its first PDU session, and this helper finds it there and does nothing. With the test adapter's `join_ues = 1`, no MRB-ToAddMod is sent, and this helper creates the MRB PDCP with the fixed values of `nr_pdcp_mbs_test.h`. Broadcast uses its announced MRB-InfoBroadcast through `nr_rrc_ue_add_mbs_broadcast_mrb()` and does not call this helper.
+  - TODO: Remove it together with the adapter's `join_ues = 1` mode.
 
 ### Data transmission
 
@@ -217,7 +317,7 @@ openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c       nr_ue_dl_processing()
 **[TODO]**
 
 - `nr_pdcp_mrb_data_req()`
-  - Today: Applies PDCP and queues the result in the PTM RLC entity. Broadcast already supplies real shared-N3 payload through `nr_pdcp_mbs_broadcast_deliver()`. Multicast still supplies one PDU session's DL traffic through `shared_delivery()` and the redirect hook in `sdap_data_req()`.
+  - Today: Applies PDCP and queues the result in the PTM RLC entity. Broadcast already supplies real shared-N3 payload through `nr_pdcp_mbs_broadcast_deliver()`. Multicast still supplies one PDU session's DL traffic through `shared_delivery()` and the redirect hook in `sdap_data_req()`, or, with `join_ues = 0`, test datagrams from `nr_mbs_test_feed_thread()`.
   - TODO: Connect multicast session setup and its shared N3 tunnel to the MRB (TS 23.247 §7.2.1.4), replacing `shared_delivery()` and `nr_sdap_set_dl_redirect()`. The existing broadcast tunnel does not replace the multicast adapter.
 
 - `nr_rlc_mrb_recv_sdu()`
@@ -225,8 +325,8 @@ openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c       nr_ue_dl_processing()
   - TODO: With a CU/DU split, F1-U must carry the MRB PDUs to the DU and call it there. Therefore, keep this function as is and consider how to call it when CU/DU is supported.
 
 - `sdap_mrb_data_ind()`
-  - Today: Multicast writes to the associated PDU session's tun; the test adapter associates the MRB with the first PDU session. `mbs.sh ll` gives the other UEs the IP of UE 1 because the adapter redirects unicast-addressed traffic. Broadcast carries the original multicast IP packets to the NAS-provided tun and needs no IP reassignment.
-  - TODO: Replace the multicast adapter's unicast traffic and fixed PDU-session association with delivery for the actual multicast session, so `mbs.sh ll` no longer needs to reassign UE addresses. A dedicated UE interface for broadcast sessions is also still missing.
+  - Today: Multicast writes to the associated PDU session's tun; the test adapter associates the MRB with the first PDU session. `mbs.sh ll` gives the other UEs the IP of UE 1 because the adapter redirects unicast-addressed traffic. Broadcast carries the original multicast IP packets to the UE's broadcast interface `oaimbs_ue<N>` (169.254.0.1, created with the first broadcast session), as a broadcast session belongs to no PDU session, and needs no IP reassignment.
+  - TODO: Replace the multicast adapter's unicast traffic and fixed PDU-session association with delivery for the actual multicast session, so `mbs.sh ll` no longer needs to reassign UE addresses.
 
 ### ACK/NACK and Retransmissions
 

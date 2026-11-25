@@ -58,9 +58,11 @@
 #define MACRLC_PUCCH_RSSI_THRESHOLD          "pucch_RSSI_Threshold"
 #define MACRLC_STATS_MAX_UE                  "stats_max_ue"
 #define MACRLC_SPATIAL_STREAM_IDX            "spatial_stream_index"
+#define MACRLC_MBS_BROADCAST_MCS             "mbs_broadcast_mcs"
 
 #define HLP_MACRLC_UL_PRBBLACK "SNR threshold to decide whether a PRB will be blacklisted or not"
 #define HLP_MACRLC_DL_BLER_UP "Upper threshold of BLER to decrease DL MCS"
+#define HLP_MACRLC_MBS_BROADCAST_MCS "MCS of MBS broadcast sessions, whose receivers report no channel quality"
 #define HLP_MACRLC_DL_BLER_LO "Lower threshold of BLER to increase DL MCS"
 #define HLP_MACRLC_DL_MIN_MCS "Minimum DL MCS that should be used"
 #define HLP_MACRLC_DL_MAX_MCS "Maximum DL MCS that should be used"
@@ -135,6 +137,8 @@
                                                                                0, .uptr=NULL,   .defintarrayval=0,          TYPE_INTARRAY,0}, \
   {MACRLC_ANALOG_BEAMFORMING_REMOVED,  NULL,                     0, .strptr=NULL, .defstrval=NULL,            TYPE_STRING,  0}, \
   {MACRLC_BEAM_WEIGHTS_LIST_REMOVED,   NULL,                     0, .iptr=NULL,   .defintarrayval=0,          TYPE_INTARRAY,0}, \
+  {MACRLC_MBS_BROADCAST_MCS,           HLP_MACRLC_MBS_BROADCAST_MCS, \
+                                                                               0, .u8ptr=NULL,  .defintval=9,               TYPE_UINT8,   0}, \
 }
 // clang-format off
 
@@ -184,6 +188,7 @@
   { .s2 = { NULL } }, /* Spatial stream index */ \
   { .s5 = { NULL } }, /* removed set_analog_beamforming */ \
   { .s5 = { NULL } }, /* removed beam_weights */ \
+  { .s2 = { config_check_intrange, {0, 28} } }, /* MBS broadcast MCS */ \
 }
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------*/

@@ -317,21 +317,9 @@ bool decodeMBSSessionSetup(mbs_session_transfer_t *out, const OCTET_STRING_t in)
     BIT_STRING_TO_TRANSPORT_LAYER_ADDRESS_IPv4(&shared->iP_MulticastAddress, out->multicast_addr);
     BIT_STRING_TO_TRANSPORT_LAYER_ADDRESS_IPv4(&shared->iP_SourceAddress, out->source_addr);
 
-    /* A GTP-TEID OCTET STRING holds the TEID in network byte order, so a
-     * big-endian read is the whole of it -- but the 5G-MAG core writes it
-     * byte-swapped, and the TEID that then turns up in the GTP-U header is
-     * the reverse of what this IE says. Compensating here keeps the
-     * workaround in one place and next to its evidence; it comes off the
-     * moment the core is fixed.
-     *
-     * Evidence: with the core sending 63 9e 00 00 the payload arrives on
-     * TEID 0x00009e63. The interim eBPF path reached the same conclusion
-     * independently -- it byte-swaps the NGAP value before matching it
-     * against the GTP-U header, and delivery only works because it does.
-     * The same core also corrupts the TMGI service id on N2. */
-    uint32_t teid_as_sent = 0;
-    OCTET_STRING_TO_INT32(&shared->gTP_TEID, teid_as_sent);
-    out->c_teid = __builtin_bswap32(teid_as_sent);
+    /* TS 38.413 §9.3.2.2: the TEID in network byte order. Versions of the
+     * 5G-MAG core before 5mbs-development wrote it byte-swapped. */
+    OCTET_STRING_TO_INT32(&shared->gTP_TEID, out->c_teid);
     out->tnl_present = true;
     break;
   }

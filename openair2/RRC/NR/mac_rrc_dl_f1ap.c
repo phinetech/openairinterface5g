@@ -174,12 +174,40 @@ static void broadcast_context_setup_f1ap(sctp_assoc_t assoc_id, const f1ap_broad
   itti_send_msg_to_task(TASK_CU_F1, 0, msg);
 }
 
+/* Broadcast Context Release (TS 38.473 §8.14.2) is not encoded yet, so a split
+ * DU is not told and keeps the session on the air. */
+static void broadcast_context_release_f1ap(sctp_assoc_t assoc_id, const f1ap_broadcast_ctx_release_t *req)
+{
+  (void)assoc_id;
+  (void)req;
+  LOG_E(F1AP, "MBS: release of a broadcast context is not supported over F1 yet, the DU keeps the session\n");
+}
+
+/* Multicast Context Setup and the multicast part of UE Context Modification
+ * (TS 38.473) are not encoded yet, so a split DU does not learn about the join. */
+static void multicast_ue_join_f1ap(sctp_assoc_t assoc_id, const f1ap_multicast_ue_join_t *req)
+{
+  (void)assoc_id;
+  (void)req;
+  LOG_E(F1AP, "MBS: a multicast join is not supported over F1 yet, the DU does not configure the UE\n");
+}
+
+static void multicast_ue_leave_f1ap(sctp_assoc_t assoc_id, const f1ap_multicast_ue_leave_t *req)
+{
+  (void)assoc_id;
+  (void)req;
+  LOG_E(F1AP, "MBS: a multicast leave is not supported over F1 yet, the DU keeps the UE in the group\n");
+}
+
 void mac_rrc_dl_f1ap_init(nr_mac_rrc_dl_if_t *mac_rrc)
 {
   mac_rrc->f1_reset = f1_reset_cu_initiated_f1ap;
   mac_rrc->f1_reset_acknowledge = f1_reset_acknowledge_du_initiated_f1ap;
   mac_rrc->f1_setup_response = f1_setup_response_f1ap;
   mac_rrc->broadcast_context_setup = broadcast_context_setup_f1ap;
+  mac_rrc->broadcast_context_release = broadcast_context_release_f1ap;
+  mac_rrc->multicast_ue_join = multicast_ue_join_f1ap;
+  mac_rrc->multicast_ue_leave = multicast_ue_leave_f1ap;
   mac_rrc->f1_setup_failure = f1_setup_failure_f1ap;
   mac_rrc->gnb_du_configuration_update_acknowledge = gnb_du_configuration_update_ack_f1ap;
   mac_rrc->ue_context_setup_request = ue_context_setup_request_f1ap;

@@ -653,30 +653,31 @@ static int udpMulticastSocket(in_addr_t group, in_addr_t source, in_addr_t local
     return -1;
   }
 
-  /* An any-source join, although the core names a source and LL-SSM is what
-   * this is.
-   *
-   * A source-specific join would be cheaper and closer to the intent, but it
-   * cannot be used here: the address the 5GC advertises as iP-SourceAddress
-   * is not the address it transmits from. Measured -- the core advertises
-   * 192.168.55.5 and the G-PDUs arrive from 192.168.77.10, so the kernel's
-   * source filter discards every one of them and the session goes silent
-   * with no error anywhere. The same core already mis-encodes the TMGI and
-   * the C-TEID byte order.
-   *
-   * `source` is kept in the signature: it is the right thing to filter on
-   * the moment the core's two addresses agree. */
-  (void)s;
-  struct ip_mreq join = {};
-  join.imr_multiaddr.s_addr = group;
-  join.imr_interface.s_addr = local;
-  if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &join, sizeof(join)) != 0) {
-    LOG_E(GTPU, "MBS: join of group %s on %s: %s\n", g, l, strerror(errno));
-    close(sockfd);
-    return -1;
+  /* LL-SSM: join the group for the source the 5GC names in iP-SourceAddress,
+   * so that nothing else sent to the group gets in. Any source only if it
+   * names none. */
+  if (source != INADDR_ANY) {
+    struct ip_mreq_source join = {};
+    join.imr_multiaddr.s_addr = group;
+    join.imr_interface.s_addr = local;
+    join.imr_sourceaddr.s_addr = source;
+    if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP, &join, sizeof(join)) != 0) {
+      LOG_E(GTPU, "MBS: join of group %s from %s on %s: %s\n", g, s, l, strerror(errno));
+      close(sockfd);
+      return -1;
+    }
+    LOG_I(GTPU, "MBS: joined group %s from %s on %s, port %u\n", g, s, l, port);
+  } else {
+    struct ip_mreq join = {};
+    join.imr_multiaddr.s_addr = group;
+    join.imr_interface.s_addr = local;
+    if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &join, sizeof(join)) != 0) {
+      LOG_E(GTPU, "MBS: join of group %s on %s: %s\n", g, l, strerror(errno));
+      close(sockfd);
+      return -1;
+    }
+    LOG_I(GTPU, "MBS: joined group %s from any source on %s, port %u\n", g, l, port);
   }
-  LOG_I(GTPU, "MBS: joined group %s on %s, port %u (any-source; advertised source %s is not used, see comment)\n",
-        g, l, port, s);
 
   globGtp.instances[sockfd].addr = {};
   snprintf(globGtp.instances[sockfd].addr.originHost, sizeof(globGtp.instances[sockfd].addr.originHost), "%s", g);
@@ -755,6 +756,14 @@ int gtpv1Term(instance_t instance)
   globGtp.instances.erase(instance);
   pthread_mutex_unlock(&globGtp.gtp_lock);
   return 0;
+}
+
+/* Stop listening on a TEID registered with gtpv1uRegisterIncomingTeid(). */
+void gtpv1uUnregisterIncomingTeid(teid_t incoming_teid)
+{
+  pthread_mutex_lock(&globGtp.gtp_lock);
+  globGtp.te2ue_mapping.erase(incoming_teid);
+  pthread_mutex_unlock(&globGtp.gtp_lock);
 }
 
 void GtpuUpdateTunnelOutgoingAddressAndTeid(instance_t instance,
